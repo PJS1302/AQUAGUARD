@@ -1,0 +1,10 @@
+{
+  "artifact_file": "production_model.pkl",
+  "model_name": "REPLACE_WITH_ACTUAL_MODEL_NAME",
+  "features": ["feature_1", "feature_2"],
+  "target_name": "REPLACE_WITH_ACTUAL_TARGET",
+  "positive_label": 1,
+  "preprocessing_in_pipeline": true,
+  "confidence_method": "predict_proba",
+  "training_notes": "Replace this example with the exact feature order and preprocessing from the user's validated training pipeline."
+}
