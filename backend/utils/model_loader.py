@@ -163,6 +163,28 @@ def _transform(frame: pd.DataFrame, bundle: dict) -> Any:
     return data
 
 
+def _prediction_error(exc: Exception, bundle: dict, subject: str) -> HTTPException:
+    message = str(exc)
+    missing_value_failure = any(
+        marker in message.lower()
+        for marker in ("contains nan", "missing values", "input x contains nan", "does not accept missing")
+    )
+    if missing_value_failure and not bundle.get("integrated") and bundle.get("preprocessing") is None:
+        return HTTPException(
+            status_code=422,
+            detail={
+                "message": f"{subject} contains missing values, but the selected production artifact has no fitted preprocessing object.",
+                "model_name": bundle.get("model_name"),
+                "artifact_file": bundle.get("config", {}).get("artifact_file"),
+                "required_action": "Install the exact preprocessing object fitted on the production model's training data, or explicitly promote a fitted estimator pipeline. AquaGuard will not fit an imputer on prediction data.",
+            },
+        )
+    return HTTPException(
+        status_code=422,
+        detail=f"{subject} could not pass through the selected production preprocessing/model pipeline: {message}",
+    )
+
+
 def _confidence(model: Any, transformed: Any) -> tuple[float | None, str | None]:
     if not hasattr(model, "predict_proba"):
         return None, None
@@ -191,7 +213,7 @@ def predict_frame(frame: pd.DataFrame, *, raise_unavailable: bool = True) -> dic
     try:
         predictions = bundle["model"].predict(transformed)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"The supplied features could not pass through the installed preprocessing/model pipeline: {exc}") from exc
+        raise _prediction_error(exc, bundle, "The supplied features") from exc
     result = {"available": True, "model_name": bundle["model_name"], "predictions": [json_safe(x) for x in predictions], "confidence": None, "confidence_method": None}
     if hasattr(bundle["model"], "predict_proba"):
         try:
@@ -216,7 +238,7 @@ def predict_one(features: dict[str, float]) -> dict:
     try:
         prediction = bundle["model"].predict(transformed)[0]
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"The input could not pass through the installed preprocessing/model pipeline: {exc}") from exc
+        raise _prediction_error(exc, bundle, "The input") from exc
     confidence, method = _confidence(bundle["model"], transformed)
     return {
         "model_name": bundle["model_name"],

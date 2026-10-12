@@ -18,24 +18,23 @@ def utcnow() -> datetime:
 
 class Device(Base):
     __tablename__ = "devices"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     device_code: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     device_name: Mapped[str] = mapped_column(String(200))
     location: Mapped[str | None] = mapped_column(String(300), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="offline", index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     readings: Mapped[list["SensorReading"]] = relationship(back_populates="device", cascade="all, delete-orphan")
 
 
 class SensorReading(Base):
     __tablename__ = "sensor_readings"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    water_quality_features: Mapped[dict] = mapped_column(JSON)
-    source: Mapped[str] = mapped_column(String(24), default="sensor")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[int] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
+    water_quality_features: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source: Mapped[str | None] = mapped_column("data_mode", String(24), default="sensor", nullable=True)
     device: Mapped[Device] = relationship(back_populates="readings")
 
 
@@ -54,15 +53,15 @@ class DatasetRecord(Base):
 
 class Prediction(Base):
     __tablename__ = "predictions"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source: Mapped[str] = mapped_column(String(24), index=True)
     dataset_id: Mapped[str | None] = mapped_column(ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True, index=True)
-    device_id: Mapped[str | None] = mapped_column(ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True)
+    device_id: Mapped[int | None] = mapped_column(ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     model_name: Mapped[str] = mapped_column(String(200))
     prediction: Mapped[str] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    input_features: Mapped[dict] = mapped_column(JSON, default=dict)
+    input_features: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
 
 
 class ModelRun(Base):

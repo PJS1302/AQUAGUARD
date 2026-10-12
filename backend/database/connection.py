@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from typing import Generator
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -33,11 +33,45 @@ def init_db() -> bool:
         return False
     try:
         from backend.database import models  # noqa: F401 - register ORM tables
+        _migrate_legacy_iot_schema()
         Base.metadata.create_all(bind=engine)
         return True
     except SQLAlchemyError as exc:
         logger.warning("PostgreSQL is not reachable during startup: %s", exc)
         return False
+
+
+def _migrate_legacy_iot_schema() -> None:
+    """Add fields needed by IoT monitoring while preserving the legacy table data."""
+    if engine is None:
+        return
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "devices" in tables and "device_code" not in {
+        column["name"] for column in inspector.get_columns("devices")
+    }:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE devices ADD COLUMN device_code VARCHAR(128)"))
+            connection.execute(
+                text(
+                    "UPDATE devices SET device_code = 'legacy-' || id::text "
+                    "WHERE device_code IS NULL"
+                )
+            )
+            connection.execute(text("ALTER TABLE devices ALTER COLUMN device_code SET NOT NULL"))
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_devices_device_code "
+                    "ON devices (device_code)"
+                )
+            )
+
+    if "predictions" in tables and "input_features" not in {
+        column["name"] for column in inspector.get_columns("predictions")
+    }:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE predictions ADD COLUMN input_features JSON"))
 
 
 def database_status() -> dict:

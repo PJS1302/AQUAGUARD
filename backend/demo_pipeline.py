@@ -7,8 +7,8 @@ from sklearn.linear_model import LogisticRegression
 
 
 class DemoWaterPreprocessor:
-    pipeline_name = "Demo Water Quality Pipeline"
-    preprocessing_steps = ["coerce numeric values", "median impute missing values"]
+    pipeline_name = "AquaGuard Task-Aware Pipeline"
+    preprocessing_steps = ["preserve the source DataFrame; fit task-specific transforms inside the estimator"]
     input_features = [
         "ph",
         "Hardness",
@@ -22,18 +22,13 @@ class DemoWaterPreprocessor:
     ]
 
     def preprocess_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
-        candidate = frame.copy(deep=True)
-        for column in self.input_features + ["Potability"]:
-            if column in candidate.columns:
-                candidate[column] = pd.to_numeric(candidate[column], errors="coerce")
-        for column in self.input_features + ["Potability"]:
-            if column in candidate.columns:
-                candidate[column] = candidate[column].fillna(candidate[column].median())
-        return candidate
+        return frame.copy(deep=True)
 
     def transform_features(self, raw_frame: pd.DataFrame) -> pd.DataFrame:
-        transformed = self.preprocess_frame(raw_frame)
-        return transformed.loc[:, self.input_features].copy(deep=True)
+        missing = [name for name in self.input_features if name not in raw_frame.columns]
+        if missing:
+            raise ValueError(f"Input is missing required model features: {missing}")
+        return raw_frame.loc[:, self.input_features].copy(deep=True)
 
 
 class DemoWaterModel:

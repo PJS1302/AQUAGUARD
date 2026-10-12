@@ -68,10 +68,10 @@ def _unpack_artifact() -> tuple[Any | None, dict[str, Any], dict[str, Any]]:
             "required_method": "preprocess_frame(DataFrame) -> DataFrame",
         }
 
-    steps = metadata.get("steps", getattr(pipeline, "preprocessing_steps", []))
+    steps = getattr(pipeline, "preprocessing_steps", metadata.get("steps", []))
     if not isinstance(steps, list) or not all(isinstance(item, str) for item in steps):
         steps = []
-    name = metadata.get("name") or getattr(pipeline, "pipeline_name", None) or type(pipeline).__name__
+    name = getattr(pipeline, "pipeline_name", None) or metadata.get("name") or type(pipeline).__name__
     try:
         artifact_sha256 = hashlib.sha256(ARTIFACT_PATH.read_bytes()).hexdigest()
     except OSError as exc:

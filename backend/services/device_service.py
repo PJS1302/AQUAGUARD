@@ -1,6 +1,6 @@
 from __future__ import annotations
+import math
 from datetime import datetime, timezone, timedelta
-from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import desc, select
@@ -14,10 +14,50 @@ from backend.utils.model_loader import predict_one
 
 
 def _lookup_device(session: Session, device_key: str) -> Device | None:
-    return session.scalar(select(Device).where((Device.id == device_key) | (Device.device_code == device_key)))
+    try:
+        numeric_id = int(device_key)
+    except ValueError:
+        numeric_id = None
+    return session.scalar(
+        select(Device).where((Device.id == numeric_id) | (Device.device_code == device_key))
+    )
+
+
+def _is_recent(timestamp: datetime | None, threshold: datetime) -> bool:
+    if timestamp is None:
+        return False
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp >= threshold
+
+
+def _valid_features(features: dict[str, float]) -> bool:
+    if not features or len(features) > 300:
+        return False
+    for key, value in features.items():
+        if not isinstance(key, str) or not key.strip() or len(key.strip()) > 200:
+            return False
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            numeric_value = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return False
+        if not math.isfinite(numeric_value):
+            return False
+    return True
 
 
 def register_device(device_id: str, device_name: str, location: str | None) -> dict:
+    device_id = device_id.strip()
+    device_name = device_name.strip()
+    location = location.strip() or None if location is not None else None
+    if not device_id or len(device_id) > 128:
+        raise HTTPException(status_code=422, detail="device_id must contain 1 to 128 non-whitespace characters.")
+    if not device_name or len(device_name) > 200:
+        raise HTTPException(status_code=422, detail="device_name must contain 1 to 200 non-whitespace characters.")
+    if location is not None and len(location) > 300:
+        raise HTTPException(status_code=422, detail="location cannot exceed 300 characters.")
     session = optional_session()
     if session is None:
         raise HTTPException(status_code=503, detail="PostgreSQL is required for device registration. Configure DATABASE_URL and confirm the database is available.")
@@ -25,17 +65,20 @@ def register_device(device_id: str, device_name: str, location: str | None) -> d
         existing = _lookup_device(session, device_id)
         if existing:
             raise HTTPException(status_code=409, detail="A device with this device_id is already registered.")
-        device = Device(id=str(uuid4()), device_code=device_id, device_name=device_name, location=location, status="offline")
+        device = Device(device_code=device_id, device_name=device_name, location=location, status="offline")
         session.add(device)
         session.commit()
         session.refresh(device)
-        return {"id": device.id, "device_id": device.device_code, "device_name": device.device_name, "location": device.location, "status": device.status, "created_at": device.created_at.isoformat(), "last_seen": None}
+        return {"id": str(device.id), "device_id": device.device_code, "device_name": device.device_name, "location": device.location, "status": device.status, "created_at": device.created_at.isoformat() if device.created_at else None, "last_seen": None}
     except HTTPException:
         session.rollback()
         raise
     except IntegrityError as exc:
         session.rollback()
         raise HTTPException(status_code=409, detail="Device id must be unique.") from exc
+    except SQLAlchemyError as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail="Could not register this device in PostgreSQL.") from exc
     finally:
         session.close()
 
@@ -47,9 +90,11 @@ def list_devices() -> list[dict]:
     try:
         devices = session.scalars(select(Device).order_by(Device.device_name)).all()
         threshold = datetime.now(timezone.utc) - timedelta(minutes=10)
-        return [{"id": d.id, "device_id": d.device_code, "device_name": d.device_name, "location": d.location,
-                 "status": "online" if d.last_seen and d.last_seen >= threshold else "offline",
-                 "created_at": d.created_at.isoformat(), "last_seen": d.last_seen.isoformat() if d.last_seen else None} for d in devices]
+        return [{"id": str(d.id), "device_id": d.device_code, "device_name": d.device_name, "location": d.location,
+                 "status": "online" if _is_recent(d.last_seen, threshold) else "offline",
+                 "created_at": d.created_at.isoformat() if d.created_at else None, "last_seen": d.last_seen.isoformat() if d.last_seen else None} for d in devices]
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Could not load registered devices from PostgreSQL.") from exc
     finally:
         session.close()
 
@@ -64,10 +109,12 @@ def get_device(device_key: str) -> dict:
             raise HTTPException(status_code=404, detail="Device was not found.")
         latest = session.scalar(select(SensorReading).where(SensorReading.device_id == device.id).order_by(desc(SensorReading.timestamp)).limit(1))
         threshold = datetime.now(timezone.utc) - timedelta(minutes=10)
-        live_status = "online" if device.last_seen and device.last_seen >= threshold else "offline"
-        return {"id": device.id, "device_id": device.device_code, "device_name": device.device_name, "location": device.location,
-                "status": live_status, "created_at": device.created_at.isoformat(), "last_seen": device.last_seen.isoformat() if device.last_seen else None,
-                "latest_reading": {"id": latest.id, "timestamp": latest.timestamp.isoformat(), "features": latest.water_quality_features, "source": latest.source} if latest else None}
+        live_status = "online" if _is_recent(device.last_seen, threshold) else "offline"
+        return {"id": str(device.id), "device_id": device.device_code, "device_name": device.device_name, "location": device.location,
+                "status": live_status, "created_at": device.created_at.isoformat() if device.created_at else None, "last_seen": device.last_seen.isoformat() if device.last_seen else None,
+                "latest_reading": {"id": latest.id, "timestamp": latest.timestamp.isoformat() if latest.timestamp else None, "features": latest.water_quality_features, "source": latest.source} if latest else None}
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Could not load this device from PostgreSQL.") from exc
     finally:
         session.close()
 
@@ -81,7 +128,9 @@ def get_readings(device_key: str, limit: int = 100) -> list[dict]:
         if not device:
             raise HTTPException(status_code=404, detail="Device was not found.")
         readings = session.scalars(select(SensorReading).where(SensorReading.device_id == device.id).order_by(desc(SensorReading.timestamp)).limit(max(1, min(limit, 1000)))).all()
-        return [{"id": r.id, "timestamp": r.timestamp.isoformat(), "features": r.water_quality_features, "source": r.source} for r in readings]
+        return [{"id": r.id, "timestamp": r.timestamp.isoformat() if r.timestamp else None, "features": r.water_quality_features, "source": r.source} for r in readings]
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Could not load device readings from PostgreSQL.") from exc
     finally:
         session.close()
 
@@ -97,9 +146,9 @@ def create_reading(device_key: str, timestamp: datetime | None, features: dict[s
         recorded_at = timestamp or datetime.now(timezone.utc)
         if recorded_at.tzinfo is None:
             recorded_at = recorded_at.replace(tzinfo=timezone.utc)
-        if len(features) > 300 or any(not isinstance(v, (int, float)) for v in features.values()):
-            raise HTTPException(status_code=422, detail="Sensor features must be a numeric JSON object.")
-        reading = SensorReading(id=str(uuid4()), device_id=device.id, timestamp=recorded_at, water_quality_features=features, source=source)
+        if not _valid_features(features):
+            raise HTTPException(status_code=422, detail="Sensor features must be a non-empty JSON object with at most 300 non-empty feature names and finite numeric values.")
+        reading = SensorReading(device_id=device.id, timestamp=recorded_at, water_quality_features=features, source=source)
         device.last_seen = datetime.now(timezone.utc)
         device.status = "online"
         session.add(reading)

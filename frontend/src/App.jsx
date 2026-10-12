@@ -35,12 +35,12 @@ export default function App() {
     }catch(error){setGlobalError(error.message||'Dataset upload failed.');throw error;}
   },[refresh]);
 
-  const handleDemoLoad=useCallback(async()=>{
+  const handleDemoLoad=useCallback(async(destination='laboratory')=>{
     setGlobalError('');setLoadingDemo(true);
     try{
       const result=await loadDemoDataset();
       setActiveDataset(result);
-      setPage('laboratory');
+      setPage(destination);
       setToast('Demo Dataset — Sample Data loaded. It is synthetic and not live water data.');
       window.setTimeout(()=>setToast(''),6500);
       refresh();
@@ -54,7 +54,7 @@ export default function App() {
   if(page==='dashboard') content=<Dashboard dashboard={dashboard} health={health} activeDataset={activeDataset} refreshing={false} onRefresh={refresh} onNavigate={setPage} onLoadDemo={handleDemoLoad}/>;
   else if(page==='datasets') content=<DatasetWorkspace activeDataset={activeDataset} onUploaded={handleUpload} onLoadDemo={handleDemoLoad} loadingDemo={loadingDemo} onNavigate={setPage}/>;
   else if(page==='prediction') content=<PredictionPage health={health} activeDataset={activeDataset} onRefresh={refresh}/>;
-  else if(page==='iot') content=<IoTMonitoring activeDataset={activeDataset} health={health} onRefreshDashboard={refresh}/>;
+  else if(page==='iot') content=<IoTMonitoring activeDataset={activeDataset} health={health} onRefreshDashboard={refresh} onLoadDemo={handleDemoLoad}/>;
   else if(page==='history') content=<History refreshToken={refreshToken}/>;
   else if(page==='about') content=<About health={health}/>;
   else content=<Laboratory activeDataset={activeDataset} onLoadDemo={handleDemoLoad} loadingDemo={loadingDemo} initialTab={TAB_FOR_PAGE[page]||'preprocessing'} onModelPromoted={afterPromote} onNavigate={setPage}/>;

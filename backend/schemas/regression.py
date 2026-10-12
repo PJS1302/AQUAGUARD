@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 class RegressionRequest(BaseModel):
@@ -8,4 +10,4 @@ class RegressionRequest(BaseModel):
     degree: int = Field(default=2, ge=2, le=5)
     folds: int = Field(default=5, ge=2, le=10)
     bandwidth: float = Field(default=0.8, gt=0, le=20)
-    query: dict[str, float] | None = None
+    query: dict[str, Any] | None = None

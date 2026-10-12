@@ -1,7 +1,9 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 class PredictionRequest(BaseModel):
-    features: dict[str, float] = Field(..., min_length=1)
+    features: dict[str, Any] = Field(..., min_length=1)
     source: str = "manual"
 
 class PredictionResult(BaseModel):

@@ -7,25 +7,30 @@ from sklearn.cluster import AgglomerativeClustering, KMeans
 from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 
 from backend.services.database_service import record_clustering_run
-from backend.utils.experiment_data import require_complete_processed_rows, require_finite_numeric
+from backend.utils.experiment_data import transform_unsupervised
 
 
-def prepare_cluster_data(frame: pd.DataFrame, features: list[str], n_clusters: int) -> tuple[pd.DataFrame, np.ndarray]:
+def prepare_cluster_data(frame: pd.DataFrame, features: list[str], n_clusters: int) -> tuple[pd.DataFrame, np.ndarray, dict]:
     missing = [feature for feature in features if feature not in frame.columns]
     if missing:
-        raise HTTPException(status_code=422, detail={"message": "Selected processed clustering feature(s) are missing.", "missing_features": missing})
+        raise HTTPException(status_code=422, detail={"message": "Selected clustering feature(s) are missing from the dataset.", "missing_features": missing})
     if not features or len(set(features)) != len(features):
-        raise HTTPException(status_code=422, detail="Select one or more distinct processed clustering features.")
+        raise HTTPException(status_code=422, detail="Select one or more distinct dataset features for clustering.")
 
-    X_df = require_complete_processed_rows(frame, features, task="Clustering", minimum=1)
-    require_finite_numeric(X_df, features, task="Clustering")
-    if len(X_df) < max(4, int(n_clusters) + 1):
-        raise HTTPException(status_code=422, detail="Not enough complete processed samples for the selected cluster count.")
+    if int(n_clusters) < 2:
+        raise HTTPException(status_code=422, detail="Clustering requires at least two clusters.")
+    X_df, preprocessing = transform_unsupervised(frame, features, allow_categorical=True)
+    if len(X_df) < int(n_clusters):
+        raise HTTPException(
+            status_code=422,
+            detail=f"The selected cluster count ({n_clusters}) exceeds the number of available rows ({len(X_df)}).",
+        )
     if len(X_df) > 5_000:
-        raise HTTPException(status_code=413, detail="Clustering (including pairwise internal metrics and hierarchical linkage) is limited to 5,000 processed rows per analysis.")
-    # The configured user's preprocessed values are used as-is; no scaling is added.
+        raise HTTPException(status_code=413, detail="Clustering (including pairwise internal metrics and hierarchical linkage) is limited to 5,000 rows per analysis.")
+    if len(X_df) * max(1, X_df.shape[1]) > 20_000_000:
+        raise HTTPException(status_code=413, detail="The one-hot transformed clustering matrix exceeds the 20-million-cell memory limit.")
     values = X_df.to_numpy(dtype=float)
-    return X_df, values
+    return X_df, values, preprocessing
 
 
 def _metrics(X: np.ndarray, labels: np.ndarray) -> dict:
@@ -62,24 +67,25 @@ def _dendrogram_data(X: np.ndarray) -> dict | None:
         return None
 
 
-def _make_result(algorithm: str, X_df: pd.DataFrame, values: np.ndarray, labels: np.ndarray, n_clusters: int, dataset_id: str, *, centers=None, dendrogram=None) -> dict:
+def _make_result(algorithm: str, X_df: pd.DataFrame, values: np.ndarray, labels: np.ndarray, n_clusters: int, dataset_id: str, preprocessing: dict, *, centers=None, dendrogram=None) -> dict:
     metrics = _metrics(values, labels)
     sizes = _sizes(labels)
     result = {
         "algorithm": algorithm,
         "dataset_id": dataset_id,
-        "features": [str(column) for column in X_df.columns],
+        "features": preprocessing["transformed_feature_names"],
         "cluster_count": int(n_clusters),
         "cluster_sizes": sizes,
         "metrics": metrics,
         "points": _points(values, labels)[:1000],
         "labels": [int(value) for value in labels[:2000]],
         "complete_rows": int(len(X_df)),
+        "feature_preprocessing": preprocessing,
         "cluster_assignments_truncated": len(X_df) > 2000,
         "scaling_applied_by_aquaguard": False,
     }
     if centers is not None:
-        result["cluster_centers"] = [{str(feature): float(value) for feature, value in zip(X_df.columns, row)} for row in centers]
+        result["cluster_centers"] = [{str(feature): float(value) for feature, value in zip(preprocessing["transformed_feature_names"], row)} for row in centers]
     if dendrogram is not None:
         result["dendrogram"] = dendrogram
     record_clustering_run(algorithm, dataset_id, n_clusters, metrics)
@@ -87,27 +93,27 @@ def _make_result(algorithm: str, X_df: pd.DataFrame, values: np.ndarray, labels:
 
 
 def run_kmeans(frame: pd.DataFrame, dataset_id: str, features: list[str], n_clusters: int = 3) -> dict:
-    X_df, values = prepare_cluster_data(frame, features, n_clusters)
+    X_df, values, preprocessing = prepare_cluster_data(frame, features, n_clusters)
     model = KMeans(n_clusters=int(n_clusters), random_state=42, n_init=10)
     labels = model.fit_predict(values)
-    return _make_result("K-Means", X_df, values, labels, n_clusters, dataset_id, centers=model.cluster_centers_)
+    return _make_result("K-Means", X_df, values, labels, n_clusters, dataset_id, preprocessing, centers=model.cluster_centers_)
 
 
 def run_hierarchical(frame: pd.DataFrame, dataset_id: str, features: list[str], n_clusters: int = 3) -> dict:
-    X_df, values = prepare_cluster_data(frame, features, n_clusters)
+    X_df, values, preprocessing = prepare_cluster_data(frame, features, n_clusters)
     model = AgglomerativeClustering(n_clusters=int(n_clusters), linkage="ward")
     labels = model.fit_predict(values)
-    return _make_result("Hierarchical / Agglomerative", X_df, values, labels, n_clusters, dataset_id, dendrogram=_dendrogram_data(values))
+    return _make_result("Hierarchical / Agglomerative", X_df, values, labels, n_clusters, dataset_id, preprocessing, dendrogram=_dendrogram_data(values))
 
 
 def compare_clustering(frame: pd.DataFrame, dataset_id: str, features: list[str], n_clusters: int = 3) -> dict:
-    X_df, values = prepare_cluster_data(frame, features, n_clusters)
+    X_df, values, preprocessing = prepare_cluster_data(frame, features, n_clusters)
     km = KMeans(n_clusters=int(n_clusters), random_state=42, n_init=10)
     km_labels = km.fit_predict(values)
     ag = AgglomerativeClustering(n_clusters=int(n_clusters), linkage="ward")
     ag_labels = ag.fit_predict(values)
-    km_result = _make_result("K-Means", X_df, values, km_labels, n_clusters, dataset_id, centers=km.cluster_centers_)
-    ag_result = _make_result("Hierarchical / Agglomerative", X_df, values, ag_labels, n_clusters, dataset_id, dendrogram=_dendrogram_data(values))
+    km_result = _make_result("K-Means", X_df, values, km_labels, n_clusters, dataset_id, preprocessing, centers=km.cluster_centers_)
+    ag_result = _make_result("Hierarchical / Agglomerative", X_df, values, ag_labels, n_clusters, dataset_id, preprocessing, dendrogram=_dendrogram_data(values))
     km_score = km_result["metrics"].get("silhouette")
     ag_score = ag_result["metrics"].get("silhouette")
     if km_score is None or ag_score is None:
@@ -115,7 +121,7 @@ def compare_clustering(frame: pd.DataFrame, dataset_id: str, features: list[str]
     elif abs(km_score - ag_score) < 1e-9:
         comment = "Both algorithms produced the same silhouette score at the displayed precision; no separation winner is identified by this metric."
     elif km_score > ag_score:
-        comment = f"K-Means has the higher silhouette score ({km_score:.4f} vs {ag_score:.4f}) on these user-preprocessed values, indicating better average separation by this metric."
+        comment = f"K-Means has the higher silhouette score ({km_score:.4f} vs {ag_score:.4f}) on these transformed values, indicating better average separation by this metric."
     else:
-        comment = f"Hierarchical clustering has the higher silhouette score ({ag_score:.4f} vs {km_score:.4f}) on these user-preprocessed values, indicating better average separation by this metric."
-    return {"dataset_id": dataset_id, "features": features, "cluster_count": int(n_clusters), "kmeans": km_result, "hierarchical": ag_result, "automatic_comment": comment, "interpretation_note": "Clusters are exploratory groups, not Safe/Unsafe labels. Clustering used the user's processed numeric values without additional scaling."}
+        comment = f"Hierarchical clustering has the higher silhouette score ({ag_score:.4f} vs {km_score:.4f}) on these transformed values, indicating better average separation by this metric."
+    return {"dataset_id": dataset_id, "features": preprocessing["transformed_feature_names"], "cluster_count": int(n_clusters), "kmeans": km_result, "hierarchical": ag_result, "automatic_comment": comment, "interpretation_note": "Clusters are exploratory groups, not Safe/Unsafe labels. Missing values use analysis-fitted imputation and categorical features use one-hot encoding; no additional scaling is applied."}

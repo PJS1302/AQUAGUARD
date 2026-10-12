@@ -1,5 +1,6 @@
 from __future__ import annotations
 import io
+import csv
 import math
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,19 @@ def validate_csv_bytes(raw: bytes, filename: str) -> pd.DataFrame:
     if not raw:
         raise HTTPException(status_code=400, detail="The uploaded CSV is empty.")
     try:
+        text = raw.decode("utf-8-sig")
+        reader = csv.reader(io.StringIO(text))
+        header = next(reader, [])
+        if header:
+            normalized = [str(value).strip() for value in header]
+            if any(not name for name in normalized):
+                raise HTTPException(status_code=400, detail="Column names cannot be blank.")
+            duplicates = sorted({name for name in normalized if normalized.count(name) > 1 and name})
+            if duplicates:
+                raise HTTPException(status_code=400, detail=f"Duplicate column names are not supported: {duplicates}")
         frame = pd.read_csv(io.BytesIO(raw), low_memory=False)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}") from exc
     validate_frame(frame)
