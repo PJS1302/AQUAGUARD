@@ -22,14 +22,24 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-origins = [item.strip() for item in os.getenv("AQUAGUARD_CORS_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins or ["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+raw_origins = os.getenv("AQUAGUARD_CORS_ORIGINS", "*").strip()
+origins = [item.strip() for item in raw_origins.split(",") if item.strip()]
+if "*" in origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 for route_module in (health, prediction, dataset, regression, classification, clustering, pca, devices, readings, dashboard, preprocessing):
     app.include_router(route_module.router, prefix="/api")
