@@ -37,10 +37,10 @@ def prepare_regression_data(
     X = frame.loc[valid, features].copy(deep=True)
     normalized = normalized.loc[valid].copy()
     y = pd.Series(values[valid], index=X.index, name=target, dtype=float)
-    if y.nunique() < 3:
+    if y.nunique() < 2:
         raise HTTPException(
             status_code=422,
-            detail="Regression needs a continuous numeric target with at least three observed values; this target appears discrete or has too few valid observations.",
+            detail="Regression needs a continuous numeric target with at least two distinct observed values; this target appears constant or has too few valid observations.",
         )
     diagnostics["target"] = {
         "name": target,

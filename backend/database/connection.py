@@ -73,6 +73,15 @@ def _migrate_legacy_iot_schema() -> None:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE predictions ADD COLUMN input_features JSON"))
 
+    if "datasets" in tables:
+        dataset_cols = {column["name"] for column in inspector.get_columns("datasets")}
+        with engine.begin() as connection:
+            if "is_demo" not in dataset_cols:
+                connection.execute(text("ALTER TABLE datasets ADD COLUMN is_demo BOOLEAN DEFAULT FALSE"))
+            if "columns" not in dataset_cols:
+                connection.execute(text("ALTER TABLE datasets ADD COLUMN columns JSON DEFAULT '[]'::json"))
+
+
 
 def database_status() -> dict:
     if engine is None:

@@ -14,13 +14,21 @@ from backend.utils.model_loader import predict_one
 
 
 def _lookup_device(session: Session, device_key: str) -> Device | None:
+    cleaned = str(device_key).strip()
+    if not cleaned:
+        return None
+    # 1. Match exact device_code first
+    device = session.scalar(select(Device).where(Device.device_code == cleaned))
+    if device is not None:
+        return device
+
+    # 2. Only if no device_code matched, fall back to legacy integer database ID
     try:
-        numeric_id = int(device_key)
+        numeric_id = int(cleaned)
     except ValueError:
-        numeric_id = None
-    return session.scalar(
-        select(Device).where((Device.id == numeric_id) | (Device.device_code == device_key))
-    )
+        return None
+    return session.scalar(select(Device).where(Device.id == numeric_id))
+
 
 
 def _is_recent(timestamp: datetime | None, threshold: datetime) -> bool:
@@ -62,7 +70,7 @@ def register_device(device_id: str, device_name: str, location: str | None) -> d
     if session is None:
         raise HTTPException(status_code=503, detail="PostgreSQL is required for device registration. Configure DATABASE_URL and confirm the database is available.")
     try:
-        existing = _lookup_device(session, device_id)
+        existing = session.scalar(select(Device).where(Device.device_code == device_id))
         if existing:
             raise HTTPException(status_code=409, detail="A device with this device_id is already registered.")
         device = Device(device_code=device_id, device_name=device_name, location=location, status="offline")

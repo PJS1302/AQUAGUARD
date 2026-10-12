@@ -188,12 +188,17 @@ def _prepare(frame: pd.DataFrame, target: str, features: list[str]):
     X = frame.loc[valid, features].copy(deep=True)
     normalized = normalized.loc[valid].copy()
     y = y.loc[valid].copy()
+    if pd.api.types.is_numeric_dtype(y):
+        # Format whole numbers as integers, and floats with high precision as strings
+        # so scikit-learn classifies them as discrete multiclass rather than continuous.
+        y = y.map(lambda val: int(val) if float(val).is_integer() else f"{val:.6g}")
     if len(X) > 100_000:
         raise HTTPException(status_code=413, detail="Supervised ML-lab experiments are limited to 100,000 target-valid rows per run.")
     if y.nunique() < 2:
         raise HTTPException(status_code=422, detail="Classification requires at least two target classes.")
+    continuous_warning = None
     if pd.api.types.is_numeric_dtype(y) and int(y.nunique()) / max(1, len(y)) >= 0.2:
-        raise HTTPException(status_code=422, detail="The selected numerical target has many distinct values and may be continuous. Choose Classification only for discrete labels; use Regression for continuous targets.")
+        continuous_warning = "The selected numerical target has many distinct values and may be continuous. Discrete labels were used; use Regression for continuous targets."
     feature_roles = {item["name"]: item["role"] for item in diagnostics["columns"]}
     numeric = [name for name in features if feature_roles[name] in {"numerical", "datetime"}]
     categorical = [name for name in features if name not in numeric]
@@ -204,6 +209,7 @@ def _prepare(frame: pd.DataFrame, target: str, features: list[str]):
         "invalid_or_missing_rows_excluded": excluded,
         "imputed": False,
         "reason": "Supervised classification cannot train on rows without a valid class label.",
+        "continuous_warning": continuous_warning,
     }
     diagnostics["rows_used"] = int(len(X))
     diagnostics["feature_missing_values"] = {
@@ -216,14 +222,20 @@ def _prepare(frame: pd.DataFrame, target: str, features: list[str]):
 def _split_indices(y: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     counts = y.value_counts()
     classes = len(counts)
-    if int(counts.min()) < 2:
-        raise HTTPException(status_code=422, detail="Every target class needs at least two valid labels so a stratified holdout can place examples in both train and test partitions.")
-    n_test = max(int(math.ceil(len(y) * 0.2)), classes)
-    if len(y) - n_test < classes:
-        raise HTTPException(status_code=422, detail="The class counts cannot populate both the stratified training and test partitions; provide more valid examples for the least frequent class.")
+    if classes < 2:
+        raise HTTPException(status_code=422, detail="Classification requires at least two target classes.")
+    if len(y) < 2:
+        raise HTTPException(status_code=422, detail="Classification requires at least two valid samples.")
+    min_class_count = int(counts.min())
+    base_test = max(2 if len(y) >= 4 else 1, int(math.ceil(len(y) * 0.2)))
+    n_test = min(len(y) - 1, base_test)
     indices = np.arange(len(y))
-    train, test = train_test_split(indices, test_size=n_test, random_state=42, stratify=y)
+    if min_class_count >= 2 and n_test >= classes and (len(y) - n_test) >= classes:
+        train, test = train_test_split(indices, test_size=n_test, random_state=42, stratify=y)
+    else:
+        train, test = train_test_split(indices, test_size=n_test, random_state=42)
     return train, test
+
 
 
 def _score(model, X_test, y_test) -> dict:

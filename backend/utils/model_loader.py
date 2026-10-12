@@ -17,7 +17,7 @@ _CACHE: dict[str, Any] | None = None
 _CACHE_SIGNATURE = None
 
 def _signature():
-    names = ("aquaguard_pipeline.pkl", "production_model.pkl", "preprocessing.pkl", "scaler.pkl", "feature_config.json")
+    names = ("aquaguard_pipeline.pkl", "production_model.pkl", "preprocessing.pkl", "scaler.pkl", "user_preprocessing_pipeline.joblib", "feature_config.json")
     values = []
     for name in names:
         path = MODELS_DIR / name
@@ -32,9 +32,14 @@ def _signature():
         if active_name and Path(active_name).name == active_name:
             stat = (MODELS_DIR / active_name).stat()
             values.append((active_name, stat.st_mtime_ns, stat.st_size))
+        prep_name = str(active.get("preprocessing_artifact", ""))
+        if prep_name and Path(prep_name).name == prep_name:
+            stat = (MODELS_DIR / prep_name).stat()
+            values.append((prep_name, stat.st_mtime_ns, stat.st_size))
     except (FileNotFoundError, ValueError, OSError):
         pass
     return tuple(values)
+
 
 
 def _load_bundle() -> dict:
@@ -107,11 +112,19 @@ def _load_bundle() -> dict:
     preprocessing = None
     scaler = None
     if not integrated:
-        prep_path = MODELS_DIR / "preprocessing.pkl"
-        scaler_path = MODELS_DIR / "scaler.pkl"
+        prep_file = config.get("preprocessing_artifact") or "preprocessing.pkl"
+        prep_path = MODELS_DIR / prep_file
+        scaler_file = config.get("scaler_artifact") or "scaler.pkl"
+        scaler_path = MODELS_DIR / scaler_file
         try:
             if prep_path.exists():
-                preprocessing = joblib.load(prep_path)
+                prep_obj = joblib.load(prep_path)
+                if isinstance(prep_obj, dict) and "pipeline" in prep_obj:
+                    preprocessing = prep_obj["pipeline"]
+                else:
+                    preprocessing = prep_obj
+            elif (MODELS_DIR / "preprocessing.pkl").exists():
+                preprocessing = joblib.load(MODELS_DIR / "preprocessing.pkl")
             if scaler_path.exists():
                 scaler = joblib.load(scaler_path)
         except Exception as exc:
@@ -147,6 +160,7 @@ def model_status() -> dict:
         "model_name": bundle["model_name"],
         "features": bundle["features"],
         "integrated_pipeline": bool(bundle.get("integrated")),
+        "preprocessing_connected": bool(bundle.get("integrated") or bundle.get("preprocessing") is not None),
     }
 
 
@@ -157,10 +171,25 @@ def _transform(frame: pd.DataFrame, bundle: dict) -> Any:
     preprocessing = bundle.get("preprocessing")
     scaler = bundle.get("scaler")
     if preprocessing is not None:
-        data = preprocessing.transform(data)
+        if hasattr(preprocessing, "transform_features") and callable(preprocessing.transform_features):
+            data = preprocessing.transform_features(data)
+        elif hasattr(preprocessing, "transform") and callable(preprocessing.transform):
+            data = preprocessing.transform(data)
+        elif hasattr(preprocessing, "preprocess_frame") and callable(preprocessing.preprocess_frame):
+            data = preprocessing.preprocess_frame(data)
+        if isinstance(data, np.ndarray) and bundle.get("features"):
+            data = pd.DataFrame(data, columns=bundle["features"])
+        elif isinstance(data, pd.DataFrame) and bundle.get("features"):
+            missing = [f for f in bundle["features"] if f not in data.columns]
+            if not missing:
+                data = data.loc[:, bundle["features"]]
     if scaler is not None:
-        data = scaler.transform(data)
+        if hasattr(scaler, "transform") and callable(scaler.transform):
+            data = scaler.transform(data)
+        if isinstance(data, np.ndarray) and bundle.get("features"):
+            data = pd.DataFrame(data, columns=bundle["features"])
     return data
+
 
 
 def _prediction_error(exc: Exception, bundle: dict, subject: str) -> HTTPException:

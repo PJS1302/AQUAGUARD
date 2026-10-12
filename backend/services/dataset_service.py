@@ -47,8 +47,10 @@ def inspect_dataframe(frame: pd.DataFrame) -> dict:
         counts = values.value_counts(dropna=True)
         class_count = len(counts)
         numeric_target = pd.api.types.is_numeric_dtype(values)
-        looks_continuous = numeric_target and class_count / max(1, len(values)) >= 0.2
-        if class_count >= 2 and int(counts.min()) >= 2 and not looks_continuous:
+        looks_continuous = numeric_target and (
+            class_count >= 50 or (len(values) > 10 and class_count / len(values) > 0.8)
+        )
+        if class_count >= 2 and int(counts.min()) >= 1 and not looks_continuous:
             classification_targets.append((column, class_count, int(counts.min())))
     classification_targets.sort(key=lambda item: (item[1], -item[2], str(item[0])))
     missing = {str(c): int(v) for c, v in frame.isna().sum().items() if int(v) > 0}
@@ -136,6 +138,9 @@ def get_dataset_path(dataset_id: str) -> Path:
     if UPLOAD_DIR.resolve() not in folder.parents:
         raise HTTPException(status_code=400, detail="Invalid dataset path.")
     if not folder.exists():
+        processed_file = (PROCESSED_DIR / f"{clean_id}.csv").resolve()
+        if PROCESSED_DIR.resolve() in processed_file.parents and processed_file.exists():
+            return processed_file
         raise HTTPException(status_code=404, detail="Dataset file was not found. Upload the CSV again after a backend restart if needed.")
     files = [path for path in folder.iterdir() if path.is_file() and path.suffix.lower() == ".csv"]
     if len(files) != 1:
