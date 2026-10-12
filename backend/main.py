@@ -44,6 +44,22 @@ else:
 for route_module in (health, prediction, dataset, regression, classification, clustering, pca, devices, readings, dashboard, preprocessing):
     app.include_router(route_module.router, prefix="/api")
 
-@app.get("/")
-def root():
-    return {"application": "AquaGuard", "docs": "/docs", "health": "/health"}
+# Serve React frontend static files when built
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pathlib import Path
+
+dist_dir = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if dist_dir.exists():
+    app.mount("/assets", StaticFiles(directory=dist_dir / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_frontend(full_path: str):
+        file_path = dist_dir / full_path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(dist_dir / "index.html")
+else:
+    @app.get("/")
+    def root():
+        return {"application": "AquaGuard", "docs": "/docs", "health": "/api/health"}
