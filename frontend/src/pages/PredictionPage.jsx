@@ -4,6 +4,7 @@ import { Button, Card, LoadingButton, Notice, Tag } from '../components/UI';
 import { ShapContributionBars, ShapWaterfallChart, ShapGlobalSummary } from '../components/Charts';
 import { predictDataset, predictOne, predictUploadFile, getGlobalShap } from '../services/predictionService';
 import { getDevices, getReadings } from '../services/iotService';
+import { getHealth } from '../services/dashboardService';
 import { downloadCsv } from '../utils/export';
 
 const DEFAULT_UNITS = {
@@ -78,7 +79,26 @@ const PRESETS = [
 ];
 
 export default function PredictionPage({ health, activeDataset, onRefresh }) {
-  const model = health?.production_model;
+  const [directModel, setDirectModel] = useState(health?.production_model || null);
+  const [loadingModel, setLoadingModel] = useState(!health?.production_model);
+
+  useEffect(() => {
+    if (health?.production_model?.available) {
+      setDirectModel(health.production_model);
+      setLoadingModel(false);
+    } else {
+      getHealth()
+        .then((res) => {
+          if (res?.production_model?.available) {
+            setDirectModel(res.production_model);
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoadingModel(false));
+    }
+  }, [health?.production_model]);
+
+  const model = (directModel?.available ? directModel : null) || health?.production_model;
   const required = model?.features || [
     'ph', 'Hardness', 'Solids', 'Chloramines', 'Sulfate',
     'Conductivity', 'Organic_carbon', 'Trihalomethanes', 'Turbidity'
@@ -244,7 +264,14 @@ export default function PredictionPage({ health, activeDataset, onRefresh }) {
   return (
     <div className="page-stack">
       {/* Model Status Alert */}
-      {!isModelReady ? (
+      {loadingModel && !isModelReady ? (
+        <Notice
+          tone="neutral"
+          title="Connecting to Machine Learning Model…"
+        >
+          Connecting to backend and loading trained model specifications…
+        </Notice>
+      ) : !isModelReady ? (
         <Notice
           tone="warning"
           title="AI prediction unavailable — trained model not configured"
@@ -482,22 +509,32 @@ export default function PredictionPage({ health, activeDataset, onRefresh }) {
 
           {/* Model Unavailable Notice */}
           {!isModelReady && inputSource === 'manual' && (
-            <div className="artifact-missing">
-              <div className="artifact-illustration">
-                <Icon name="cpu" size={28} />
+            loadingModel ? (
+              <div style={{ padding: '36px 16px', textAlign: 'center', color: '#688289' }}>
+                <div style={{ marginBottom: '8px' }}>
+                  <Icon name="activity" size={24} />
+                </div>
+                <strong>Connecting to AquaGuard ML Model…</strong>
+                <p style={{ fontSize: '11px', marginTop: '4px' }}>Loading classifier parameters from backend.</p>
               </div>
-              <h4>Production Model Needed</h4>
-              <p>
-                AquaGuard does not guess or fabricate predictions. Install your validated ML artifact and matching preprocessing pipeline at <code>backend/models/production_model.pkl</code>.
-              </p>
-              <Button
-                variant="secondary"
-                icon="flask"
-                onClick={() => (window.location.hash = '#laboratory')}
-              >
-                Go to ML Laboratory
-              </Button>
-            </div>
+            ) : (
+              <div className="artifact-missing">
+                <div className="artifact-illustration">
+                  <Icon name="cpu" size={28} />
+                </div>
+                <h4>Production Model Needed</h4>
+                <p>
+                  AquaGuard does not guess or fabricate predictions. Install your validated ML artifact and matching preprocessing pipeline at <code>backend/models/production_model.pkl</code>.
+                </p>
+                <Button
+                  variant="secondary"
+                  icon="flask"
+                  onClick={() => (window.location.hash = '#laboratory')}
+                >
+                  Go to ML Laboratory
+                </Button>
+              </div>
+            )
           )}
         </Card>
 
@@ -718,6 +755,38 @@ export default function PredictionPage({ health, activeDataset, onRefresh }) {
                 <div className="shap-narrative">
                   <strong>Key Influencing Factors: </strong>
                   {result.shap_explanation.summary_text}
+                </div>
+              )}
+
+              {/* Optional Generative AI Expert Advisory (Gemini / OpenAI) */}
+              {result.shap_explanation.ai_expert_advisory && (
+                <div className="shap-ai-advisory" style={{
+                  background: 'linear-gradient(135deg, rgba(13, 148, 136, 0.08) 0%, rgba(99, 102, 241, 0.08) 100%)',
+                  border: '1px solid rgba(13, 148, 136, 0.28)',
+                  borderRadius: '10px',
+                  padding: '12px 14px',
+                  marginBottom: '14px',
+                  display: 'flex',
+                  gap: '12px',
+                  alignItems: 'flex-start'
+                }}>
+                  <span style={{
+                    background: '#0d9488',
+                    color: '#ffffff',
+                    padding: '3px 8px',
+                    borderRadius: '5px',
+                    fontSize: '10px',
+                    fontWeight: '700',
+                    letterSpacing: '0.04em',
+                    textTransform: 'uppercase',
+                    whiteSpace: 'nowrap',
+                    marginTop: '2px'
+                  }}>
+                    {result.shap_explanation.ai_expert_advisory.provider} AI Advisory
+                  </span>
+                  <span style={{ fontSize: '12.5px', color: '#134e4a', lineHeight: 1.55 }}>
+                    {result.shap_explanation.ai_expert_advisory.advisory}
+                  </span>
                 </div>
               )}
 

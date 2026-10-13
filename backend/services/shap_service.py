@@ -105,6 +105,74 @@ def get_explainer(model: Any, preprocessor: Any, features: list[str]) -> Any:
     return explainer
 
 
+def _generate_optional_llm_advisory(
+    target_class: str,
+    predicted_label: str,
+    summary_text: str,
+    contributions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Generate an optional LLM-powered expert narrative if an API key (e.g. GEMINI_API_KEY or OPENAI_API_KEY) is configured.
+
+    If neither key is configured, returns None so that ML and SHAP work purely locally without network dependencies.
+    """
+    import os
+
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    if not gemini_key and not openai_key:
+        return None
+
+    top_pos = [c["feature"] for c in contributions if c.get("direction") == "positive"][:2]
+    top_neg = [c["feature"] for c in contributions if c.get("direction") == "negative"][:2]
+
+    prompt = (
+        f"AquaGuard Water Quality Assessment:\n"
+        f"Prediction: {predicted_label} (Target class: {target_class})\n"
+        f"Key positive SHAP factors: {', '.join(top_pos) if top_pos else 'None'}\n"
+        f"Key negative SHAP factors: {', '.join(top_neg) if top_neg else 'None'}\n"
+        f"Summary: {summary_text}\n"
+        f"In 2 brief sentences, provide an expert biochemical interpretation and what filtration/treatment is recommended."
+    )
+
+    if gemini_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            text = getattr(response, "text", "")
+            if text:
+                return {
+                    "provider": "Google Gemini",
+                    "advisory": text.strip(),
+                }
+        except Exception as exc:
+            logger.warning("Optional Gemini API call failed: %s", exc)
+
+    if openai_key:
+        try:
+            import openai
+            client = openai.OpenAI(api_key=openai_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+            )
+            text = response.choices[0].message.content or ""
+            if text:
+                return {
+                    "provider": "OpenAI",
+                    "advisory": text.strip(),
+                }
+        except Exception as exc:
+            logger.warning("Optional OpenAI API call failed: %s", exc)
+
+    return None
+
+
 def explain_prediction(
     model: Any,
     preprocessor: Any,
@@ -234,6 +302,9 @@ def explain_prediction(
 
         summary_text = "; ".join(summary_parts) if summary_parts else "Features contributed evenly across baseline."
 
+        # Optional Generative AI explanation if user configured an API key
+        ai_advisory = _generate_optional_llm_advisory(target_class="POTABLE", predicted_label=target_labels.get("1" if running_sum >= 0 else "0", "POTABLE"), summary_text=summary_text, contributions=contributions)
+
         return {
             "supported": True,
             "base_value": round(base_val, 4),
@@ -245,6 +316,7 @@ def explain_prediction(
             "top_positive": [item[0] for item in positive_influences[:3]],
             "top_negative": [item[0] for item in negative_influences[:3]],
             "summary_text": summary_text,
+            "ai_expert_advisory": ai_advisory,
             "disclaimer": "SHAP explains how the mathematical model reached its decision; it does not independently establish certified drinking water safety.",
         }
 

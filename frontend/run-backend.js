@@ -22,14 +22,27 @@ function detectPythonCommand() {
     }
   }
 
-  // System Python candidates (prefer 'py' on Windows, 'python3' on Unix)
+  // System Python candidates: prefer the Python environment that has fastapi & shap installed
   const systemCandidates = process.platform === 'win32'
-    ? ['py', 'python', 'python3']
+    ? ['python', 'py -3.11', 'py', 'python3']
     : ['python3', 'python', 'py'];
 
   for (const candidate of systemCandidates) {
     try {
-      const res = spawnSync(candidate, ['--version'], { stdio: 'ignore', shell: true });
+      const parts = candidate.split(' ');
+      const res = spawnSync(parts[0], [...parts.slice(1), '-c', 'import fastapi, shap'], { stdio: 'ignore', shell: true });
+      if (res.status === 0) {
+        return { cmd: candidate, args: [] };
+      }
+    } catch (_) {
+      // Continue to next candidate
+    }
+  }
+
+  for (const candidate of systemCandidates) {
+    try {
+      const parts = candidate.split(' ');
+      const res = spawnSync(parts[0], [...parts.slice(1), '--version'], { stdio: 'ignore', shell: true });
       if (res.status === 0) {
         return { cmd: candidate, args: [] };
       }
@@ -39,7 +52,7 @@ function detectPythonCommand() {
   }
 
   // Default fallback
-  return { cmd: process.platform === 'win32' ? 'py' : 'python3', args: [] };
+  return { cmd: 'python', args: [] };
 }
 
 const { cmd } = detectPythonCommand();

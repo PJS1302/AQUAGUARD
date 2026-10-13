@@ -116,6 +116,27 @@ export default function About({health}) {
             • <code>WS /api/ws/iot</code> — Live real-time WebSocket telemetry stream
           </p>
         </div>
+
+        <div style={{ background: '#f8faf9', border: '1px solid #dce8e6', borderRadius: '9px', padding: '14px' }}>
+          <strong style={{ fontSize: '11px', color: '#13545b', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <Icon name="cpu" size={14} /> 3. Do SHAP & AI Need API Keys?
+          </strong>
+          <p style={{ fontSize: '9.5px', color: '#5b747b', lineHeight: '1.6', marginTop: '6px' }}>
+            • <b>SHAP & ML Inference:</b> Run <b>100% locally and offline</b> on your computer using <code>scikit-learn</code> and <code>shap</code>. No paid external API key is needed.<br />
+            • <b>Optional Generative AI Advisory:</b> If you want natural-language biochemical advice, add <code>GEMINI_API_KEY</code> or <code>OPENAI_API_KEY</code> to your project's <code>.env</code> file.
+          </p>
+        </div>
+
+        <div style={{ background: '#f8faf9', border: '1px solid #dce8e6', borderRadius: '9px', padding: '14px' }}>
+          <strong style={{ fontSize: '11px', color: '#13545b', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <Icon name="shield" size={14} /> 4. Where to Set Keys in .env
+          </strong>
+          <p style={{ fontSize: '9.5px', color: '#5b747b', lineHeight: '1.6', marginTop: '6px' }}>
+            • Open <code>.env</code> in the project root directory.<br />
+            • Add <code>GEMINI_API_KEY="AIzaSy..."</code> from Google AI Studio or <code>OPENAI_API_KEY="sk-..."</code>.<br />
+            • For secure ESP32 sensor ingress, optionally set <code>AQUAGUARD_API_KEY="your-secret"</code> and send the <code>X-API-Key</code> header.
+          </p>
+        </div>
       </div>
 
       <div style={{ marginTop: '16px' }}>
