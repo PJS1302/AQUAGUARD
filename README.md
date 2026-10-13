@@ -2,7 +2,7 @@
 
 AquaGuard is a React/JavaScript + FastAPI + PostgreSQL platform for water-quality dataset inspection, task-appropriate ML experiments, a configurable production inference path, and IoT history. It is intentionally not a single pipeline that forces every algorithm to solve the same problem.
 
-> **Model status for this project snapshot:** The user's original training code, model artifacts, feature contract, preprocessing objects and evaluation report were not supplied. AquaGuard therefore ships with **no production model** and makes no production prediction until a real artifact is installed or a real dataset experiment is explicitly promoted. The bundled `Demo Dataset — Sample Data` is synthetic and is not live water data or a validated safety dataset.
+> **Model status:** Production inference uses only the artifact and exact feature contract selected in `backend/models/feature_config.json`. A standalone estimator without its fitted preprocessing artifact cannot safely accept missing values; AquaGuard reports that incompatibility instead of fitting transforms on prediction data or substituting another model. The bundled `Demo Dataset — Sample Data` is synthetic and is not live water data or a validated safety dataset.
 
 ## Architecture
 
@@ -16,11 +16,11 @@ FastAPI ── pandas / NumPy / scikit-learn / joblib
    └── PostgreSQL (devices, readings, datasets, predictions, experiment history)
 ```
 
-- **Production prediction:** one selected and validated classifier + the user's saved preprocessing/scaler, exact ordered feature list and model artifact. No automatic PCA or lab estimator is inserted.
+- **Production prediction:** the explicitly selected production classifier + its saved fitted preprocessing/scaler (when required) and exact ordered feature list. No automatic PCA, newly fitted prediction transform, or substitute lab estimator is inserted.
 - **Regression:** continuous targets only; Linear, Multiple Linear, Polynomial and Locally Weighted Linear Regression. K-Fold reports actual fold scores.
 - **Classification:** CART Decision Tree, numeric-threshold C4.5-style gain-ratio tree, Gaussian Naive Bayes, KNN, Bagging, AdaBoost and Random Forest. Model comparison uses actual holdout/cross-validation results.
-- **PCA:** exploratory dimensionality reduction over the user's processed numeric values; AquaGuard adds no scaler.
-- **Clustering:** K-Means and Ward agglomerative clustering over user-processed numeric values as-is, with Silhouette, Davies–Bouldin and Calinski–Harabasz where defined. Cluster IDs are not Safe/Unsafe labels.
+- **PCA:** exploratory dimensionality reduction over selected numeric features, with numeric conversion and missing-value handling reported in the result.
+- **Clustering:** K-Means and Ward agglomerative clustering over selected dataset-aware numeric/encoded features, with Silhouette, Davies–Bouldin and Calinski–Harabasz where defined. Cluster IDs are not Safe/Unsafe labels.
 - **IoT:** registered devices and readings are persisted to PostgreSQL. The optional simulation submits deterministic rows from the demo CSV and is explicitly marked `simulation`.
 
 ## Project structure
@@ -112,7 +112,7 @@ Open the Vite URL (normally `http://localhost:5173`). `vite.config.js` proxies s
 
 ## User model / preprocessing setup
 
-AquaGuard does **not** replace or silently retrain the user's existing ML work. No original preprocessing code or artifact was supplied with this project, so AquaGuard ships with **no default preprocessing pipeline**. Until the real pipeline is installed, datasets can still be uploaded, preserved, and inspected, but preprocessing-copy creation and ML experiments fail closed rather than substituting app-defined transforms.
+AquaGuard does not replace or silently retrain the user's existing ML work. ML experiments use a dataset-aware feature pipeline: selected columns are normalized by detected type, feature imputers/encoders are fitted on the training partition only, and that fitted transformer is reused for validation, evaluation, and prediction. Missing or invalid supervised targets are not imputed; excluded target rows and feature transformations are reported. No source upload is changed. The separate optional preprocessing-copy endpoint below continues to run only an explicitly installed user pipeline.
 
 ### Install the exact Python preprocessing implementation
 
@@ -129,11 +129,11 @@ Install the user's reviewed pipeline locally at `backend/models/user_preprocessi
 }
 ```
 
-The object must implement `preprocess_frame(frame: pandas.DataFrame) -> pandas.DataFrame`. Implement this method using **only the same steps and order as the user's Python ML development code**. AquaGuard passes it a deep copy of the uploaded dataframe. The method's result must retain the original dataframe index labels for all retained rows, and include the processed target column for supervised experiments. This preserves row-to-label alignment when the user's own code excludes rows. Do not add an app-side `dropna`, imputer, duplicate remover, scaler, encoder, or any other step.
+The object must implement `preprocess_frame(frame: pandas.DataFrame) -> pandas.DataFrame`. Implement this method using **only the same steps and order as the user's Python ML development code**. AquaGuard passes it a deep copy of the uploaded dataframe. The method's result must retain the original dataframe index labels for all retained rows and any target columns needed by the optional processing copy. This preserves row-to-label alignment when the user's own code excludes rows. This optional endpoint does not alter the independent dataset-aware ML experiment pipeline.
 
-If the original pipeline excludes missing-value rows, it should do so inside `preprocess_frame`; only the separate processing copy is affected. If the pipeline explicitly imputes, the imputation must be implemented there because it was part of the user's original workflow. Any missing selected feature/target values left by the user's pipeline block an experiment; AquaGuard will not drop or impute them. Regression and classification train/test experiments require at least **12 complete processed rows** across the selected inputs and target. With fewer than 12, no split, fit, or metrics are produced.
+If the original user pipeline excludes rows or explicitly imputes, that behavior belongs inside `preprocess_frame`; only the separate processing copy is affected. The ML experiment path independently reports and excludes rows with unusable targets and fits selected-feature imputation/encoding on its training partition. There is no universal minimum of 12 rows: requirements depend on the task, target distribution, requested evaluation method, and algorithm. For example, holdout regression needs at least two valid targets, while classification also needs enough observations per class to put every class in both partitions.
 
-For explicit production promotion of a lab classifier, the same object must additionally implement `transform_features(raw_frame: pandas.DataFrame) -> pandas.DataFrame` and declare the exact raw `input_features`. `transform_features` must preserve every input row and its index. The processed feature columns must match those used in the lab fit. If this inference contract is absent or incompatible, promotion is disabled; install the validated production model/pipeline directly instead.
+Lab promotion saves the estimator together with its fitted dataset-aware preprocessing pipeline and the exact ordered raw feature list. Promotion is explicit and remains disabled for synthetic demo data; it does not reuse or refit transforms from the optional processing-copy artifact.
 
 ### Production model artifacts
 
@@ -158,9 +158,9 @@ The Classification Lab saves evaluation artifacts under `backend/models/experime
 
 `frontend/public/demo/demo_water_quality.csv` uses a familiar water-quality feature layout (`ph`, `Hardness`, `Solids`, `Chloramines`, `Sulfate`, `Conductivity`, `Organic_carbon`, `Trihalomethanes`, `Turbidity`, `Potability`) and includes missing cells plus a duplicate row for data-quality demonstrations. It is deterministic **synthetic sample data** with illustrative labels—not a lab result, live sensor reading, safety threshold or validated dataset.
 
-Use **Load demo dataset** to test CSV validation and read-only inspection. The demo is synthetic and cannot be promoted. Demo and uploaded datasets follow the same installed user pipeline before any ML experiment; if no actual pipeline is installed, AquaGuard blocks processing and experiments rather than falling back to sample transforms. For real datasets, choose **Datasets & Upload** and upload a CSV. AquaGuard reports rows, columns, types, missing values and duplicates; incompatible processed features fail clearly.
+Use **Load demo dataset** to test CSV validation and read-only inspection. The demo is synthetic and cannot be promoted. Demo and uploaded datasets follow the same dataset-aware ML handling. AquaGuard reports rows, columns, inferred types, missing values, and duplicates; unsupported selections fail clearly. The separately installed user pipeline is used only when explicitly creating a processing copy.
 
-The upload is stored byte-for-byte and never overwritten. `POST /datasets/{dataset_id}/preprocess` applies only the locally installed user's pipeline to a separate copy and saves that output separately. The processing report shows the pipeline and row counts. An incomplete processed feature/target set is rejected; the application never applies its own missing-row deletion or imputation.
+The upload is stored byte-for-byte and never overwritten. `POST /datasets/{dataset_id}/preprocess` applies only the locally installed user's pipeline to a separate copy and saves that output separately. The processing report shows the pipeline and row counts. An incomplete processed feature/target set is rejected; the app does not silently modify the user's optional processing-copy pipeline.
 
 ## ML Laboratory guide
 
@@ -173,16 +173,16 @@ The upload is stored byte-for-byte and never overwritten. `POST /datasets/{datas
 | K-Fold | Validation technique, not a predictor | Individual fold scores, mean and standard deviation |
 | Decision Tree / CART | Classification via CART tree splits | Weighted metrics, confusion matrix |
 | C4.5-style tree | Numeric threshold splits ranked by entropy-based gain ratio, with mean-gain filter | Explicitly distinct from CART; tree summary and metrics |
-| Gaussian Naive Bayes | Numeric processed features; categorical inputs must be handled by the user's pipeline | Weighted metrics and confusion matrix |
-| KNN | Uses the user's processed feature values exactly; no AquaGuard scaler or encoder | Configurable K, weighted metrics |
+| Gaussian Naive Bayes | Uses training-fitted numeric imputation and categorical encoding; numeric scales are unchanged | Weighted metrics and confusion matrix |
+| KNN | Fits feature imputation/encoding on the training split; numeric scales are otherwise unchanged | Configurable K, weighted metrics |
 | Bagging | Bootstrap aggregation of decision-tree estimators on processed inputs | Actual holdout and CV metrics |
 | AdaBoost | Sequentially reweighted weak tree estimators | Estimator count, learning rate and actual metrics |
 | Random Forest | Bagged randomized decision trees | Metrics and impurity-based feature importance |
-| PCA | Explicit exploratory reduction of the user's processed numeric values; no automatic scaler | Explained and cumulative variance, loadings and PC scores |
-| K-Means | Unsupervised partitioning of user-processed numeric values as-is | Sizes, centers and internal scores |
-| Hierarchical | Ward agglomerative grouping of user-processed numeric values as-is | Sizes, dendrogram and internal scores |
+| PCA | Selected numerical features only; numeric conversion and analysis-fitted missing-value handling; no automatic standardization | Explained and cumulative variance, loadings and PC scores |
+| K-Means | Dataset-aware numeric conversion, imputation and categorical encoding | Sizes, centers and internal scores |
+| Hierarchical | Dataset-aware numeric conversion, imputation and categorical encoding | Sizes, dendrogram and internal scores |
 
-The exact installed user preprocessing pipeline runs on a separate copy before each ML analysis. Classification comparison uses the same processed feature set and stratified split across all methods. K-Fold uses stratified folds for classification and shuffled folds for regression. Regression/classification require at least 12 complete processed selected rows; any remaining missing inputs block the run rather than being dropped or imputed. Metrics are calculated from each actual run; there are no preset performance values or auto-promoted model.
+ML analyses use the selected original columns and task-aware conversion for numeric, categorical, Boolean, and date/time data. Missing/invalid target rows are counted and excluded; missing feature values are handled by transformations fitted only on training data and reused for the holdout/folds. Categorical features are encoded by the same fitted pipeline. Classification comparison uses a shared split and task-compatible estimators. K-Fold uses stratified folds for classification and shuffled folds for regression when available class counts/sample count support the requested fold count. PCA and clustering report the feature handling they apply. Sample and feature requirements are validated per algorithm/evaluation method; no universal 12-row or fixed feature-count rule is imposed. Metrics are calculated from actual runs; there are no preset performance values or auto-promoted models.
 
 ## IoT simulation and real sensor integration
 

@@ -1,12 +1,11 @@
 from __future__ import annotations
-from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.database.connection import optional_session
-from backend.database.models import DatasetRecord, Prediction, ModelRun, RegressionRun, ClusteringRun, PCARun, Device, SensorReading
+from backend.database.models import DatasetRecord, Prediction, ModelRun, RegressionRun, ClusteringRun, PCARun
 
 
 def persist_dataset(info: dict) -> bool:
@@ -39,13 +38,13 @@ def record_prediction(*, source: str, model_name: str, prediction, confidence, f
     if session is None:
         return None
     try:
-        record_id = str(uuid4())
-        session.add(Prediction(
-            id=record_id, source=source, model_name=model_name, prediction=str(prediction), confidence=confidence,
+        record = Prediction(
+            source=source, model_name=model_name, prediction=str(prediction), confidence=confidence,
             input_features=features, dataset_id=dataset_id, device_id=device_id,
-        ))
+        )
+        session.add(record)
         session.commit()
-        return record_id
+        return str(record.id)
     except SQLAlchemyError:
         session.rollback()
         return None
@@ -118,7 +117,7 @@ def record_predictions_bulk(*, source: str, model_name: str, values: list[dict],
     session = optional_session()
     if session is None: return 0
     try:
-        rows = [Prediction(id=str(uuid4()), source=source, model_name=model_name, prediction=str(item["prediction"]),
+        rows = [Prediction(source=source, model_name=model_name, prediction=str(item["prediction"]),
                            confidence=item.get("confidence"), input_features=item.get("features", {}),
                            dataset_id=dataset_id, device_id=device_id) for item in values]
         session.add_all(rows)

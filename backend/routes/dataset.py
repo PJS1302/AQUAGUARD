@@ -1,7 +1,9 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+from typing import Any
 
+import pandas as pd
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
@@ -21,17 +23,75 @@ from backend.services.ml_service import model_status
 router = APIRouter()
 
 
-def _compatibility(columns: list[str]) -> str:
+def _compatibility(columns: list[str], frame: pd.DataFrame | None = None) -> dict[str, Any]:
     status = model_status()
     if not status.get("available"):
-        return "no_production_model"
-    missing = [name for name in status.get("features", []) if name not in columns]
-    return "missing_features: " + ", ".join(missing) if missing else "compatible_feature_schema"
+        return {
+            "status": "no_production_model",
+            "schema_compatible": False,
+            "prediction_ready": False,
+            "reason": status.get("reason") or "No production model artifact is installed.",
+            "missing_features": [],
+            "missing_values_count": 0,
+            "preprocessing_connected": False,
+        }
+    expected = status.get("features", [])
+    missing = [name for name in expected if name not in columns]
+    schema_compatible = len(missing) == 0
+
+    has_missing_values = False
+    missing_values_count = 0
+    incompatible_types = []
+    if frame is not None and schema_compatible:
+        for f in expected:
+            if f in frame.columns:
+                n_miss = int(frame[f].isna().sum())
+                missing_values_count += n_miss
+                if n_miss > 0:
+                    has_missing_values = True
+                # Check numeric conversion
+                numeric = pd.to_numeric(frame[f].dropna(), errors="coerce")
+                if numeric.isna().any():
+                    incompatible_types.append(f)
+
+    preprocessing_connected = bool(status.get("preprocessing_connected"))
+    
+    # Prediction readiness requires:
+    # 1. Schema compatible (all expected features present)
+    # 2. No incompatible types
+    # 3. Either no missing values OR a preprocessing pipeline is connected to handle missing values
+    prediction_ready = (
+        schema_compatible
+        and len(incompatible_types) == 0
+        and (not has_missing_values or preprocessing_connected)
+    )
+
+    if not schema_compatible:
+        status_text = "missing_features: " + ", ".join(missing)
+    elif incompatible_types:
+        status_text = "incompatible_types: " + ", ".join(incompatible_types)
+    elif has_missing_values and not preprocessing_connected:
+        status_text = "missing_values_without_preprocessor"
+    else:
+        status_text = "compatible_feature_schema"
+
+    return {
+        "status": status_text,
+        "schema_compatible": schema_compatible,
+        "prediction_ready": prediction_ready,
+        "missing_features": missing,
+        "missing_values_count": missing_values_count,
+        "incompatible_types": incompatible_types,
+        "preprocessing_connected": preprocessing_connected,
+        "model_name": status.get("model_name"),
+    }
 
 
-def _public_info(info: dict) -> dict:
+def _public_info(info: dict, frame: pd.DataFrame | None = None) -> dict:
     result = {k: v for k, v in info.items() if not k.startswith("_")}
-    result["compatibility_status"] = _compatibility(result.get("columns", []))
+    compat = _compatibility(result.get("columns", []), frame)
+    result["compatibility_status"] = compat["status"]
+    result["prediction_readiness"] = compat
     return result
 
 
@@ -39,15 +99,19 @@ def _public_info(info: dict) -> dict:
 async def upload_dataset(file: UploadFile = File(...), is_demo: bool = Form(False)):
     raw = await file.read(MAX_UPLOAD_BYTES + 1)
     info = save_uploaded_bytes(raw, file.filename or "dataset.csv", is_demo=is_demo)
-    info["compatibility_status"] = _compatibility(info["columns"])
+    frame = __import__("pandas").read_csv(info["_path"], low_memory=False)
+    compat = _compatibility(info["columns"], frame)
+    info["compatibility_status"] = compat["status"]
+    info["prediction_readiness"] = compat
     sidecar = Path(info["_path"]).parent / "metadata.json"
     metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     metadata["compatibility_status"] = info["compatibility_status"]
+    metadata["prediction_readiness"] = compat
     sidecar.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
     persisted = persist_dataset(info)
-    public = _public_info(info)
+    public = _public_info(info, frame)
     public["postgres_persisted"] = persisted
-    public["data_quality"] = data_quality_report(__import__("pandas").read_csv(info["_path"], low_memory=False))
+    public["data_quality"] = data_quality_report(frame)
     return public
 
 
@@ -74,7 +138,15 @@ def download_original(dataset_id: str):
 @router.get("/datasets/{dataset_id}")
 def inspect_dataset(dataset_id: str):
     frame, metadata = load_dataset(dataset_id)
-    return {**{k: v for k, v in metadata.items() if k != "preview"}, **inspect_dataframe(frame), "data_quality": data_quality_report(frame), "compatibility_status": _compatibility([str(c) for c in frame.columns]), "original_preserved": True}
+    compat = _compatibility([str(c) for c in frame.columns], frame)
+    return {
+        **{k: v for k, v in metadata.items() if k != "preview"},
+        **inspect_dataframe(frame),
+        "data_quality": data_quality_report(frame),
+        "compatibility_status": compat["status"],
+        "prediction_readiness": compat,
+        "original_preserved": True,
+    }
 
 
 @router.post("/datasets/{dataset_id}/preprocess")

@@ -7,12 +7,6 @@ dist/
 .env
 backend/data/uploads/*
 backend/models/experiments/*
-backend/models/production_model.pkl
-backend/models/scaler.pkl
-backend/models/preprocessing.pkl
-backend/models/feature_config.json
-backend/models/aquaguard_pipeline.pkl
-backend/models/user_preprocessing_pipeline.joblib
 backend/models/*.tmp
 *.log
 

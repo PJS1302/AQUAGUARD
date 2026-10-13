@@ -11,7 +11,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import HTTPException
-from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.ensemble import AdaBoostClassifier, BaggingClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
@@ -19,7 +19,7 @@ from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier, export_text
 
-from backend.utils.experiment_data import require_complete_processed_rows, require_finite_numeric
+from backend.utils.experiment_data import make_preprocessing_pipeline, normalize_feature_frame
 
 from backend.config import EXPERIMENT_DIR
 from backend.services.database_service import record_model_run
@@ -139,16 +139,8 @@ class C45Classifier(ClassifierMixin, BaseEstimator):
 
 
 def _make_estimator(name: str, numeric: list[str], categorical: list[str], *, k: int = 5, n_estimators: int = 100, learning_rate: float = 0.8):
-    if categorical:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "The selected processed features are not all numeric. Apply the user's "
-                "actual encoding in the installed preprocessing pipeline; AquaGuard will not encode or scale them."
-            ),
-        )
-    if not numeric:
-        raise HTTPException(status_code=422, detail="Select at least one numeric feature from the user's processed dataset.")
+    if not numeric and not categorical:
+        raise HTTPException(status_code=422, detail="Select at least one usable input feature.")
     if name == "c45":
         return C45Classifier()
     if name == "decision-tree":
@@ -156,7 +148,7 @@ def _make_estimator(name: str, numeric: list[str], categorical: list[str], *, k:
     if name == "naive-bayes":
         return GaussianNB()
     if name == "knn":
-        # KNN consumes exactly the processed values; AquaGuard adds no scaler.
+        # Imputation/encoding is shared across estimators; numeric magnitudes remain unscaled.
         return KNeighborsClassifier(n_neighbors=int(k), weights="distance")
     if name == "bagging":
         return BaggingClassifier(estimator=DecisionTreeClassifier(random_state=42), n_estimators=int(n_estimators), random_state=42, n_jobs=-1)
@@ -169,53 +161,81 @@ def _make_estimator(name: str, numeric: list[str], categorical: list[str], *, k:
 
 def _prepare(frame: pd.DataFrame, target: str, features: list[str]):
     if target not in frame.columns:
-        raise HTTPException(status_code=422, detail=f"Target column '{target}' was not found in the user's processed dataset.")
+        raise HTTPException(status_code=422, detail=f"Target column '{target}' was not found in the uploaded dataset.")
     missing = [c for c in features if c not in frame.columns]
     if missing:
-        raise HTTPException(status_code=422, detail={"message": "Selected processed classification feature(s) are missing.", "missing_features": missing})
+        raise HTTPException(status_code=422, detail={"message": "Selected classification feature(s) are missing from the dataset.", "missing_features": missing})
     if not features or len(set(features)) != len(features):
-        raise HTTPException(status_code=422, detail="Select one or more distinct processed input features.")
+        raise HTTPException(status_code=422, detail="Select one or more distinct dataset input features.")
     if target in features:
         raise HTTPException(status_code=422, detail="The target cannot also be an input feature.")
 
-    columns = features + [target]
-    data = require_complete_processed_rows(frame, columns, task="Classification")
-    if len(data) > 100_000:
-        raise HTTPException(status_code=413, detail="Supervised ML-lab experiments are limited to 100,000 complete processed rows per run.")
-    y = data[target].copy()
+    normalized, diagnostics = normalize_feature_frame(frame, features)
+    raw_target = frame[target]
+    if raw_target.dtype == object or isinstance(raw_target.dtype, pd.StringDtype):
+        text = raw_target.astype("string").str.strip()
+        raw_target = raw_target.mask(text.str.lower().isin({"", "na", "n/a", "nan", "null", "none", "nat"}), pd.NA)
+    y = raw_target.copy()
+    if pd.api.types.is_numeric_dtype(y):
+        values = pd.to_numeric(y, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+        y = pd.Series(values, index=y.index, name=target)
+        y = y.mask(~np.isfinite(y))
+    else:
+        y = y.astype("string").str.strip().astype("object")
+        y = y.mask(y.isin({"", "na", "n/a", "nan", "null", "none", "nat"}))
+    valid = y.notna()
+    excluded = int((~valid).sum())
+    X = frame.loc[valid, features].copy(deep=True)
+    normalized = normalized.loc[valid].copy()
+    y = y.loc[valid].copy()
+    if pd.api.types.is_numeric_dtype(y):
+        # Format whole numbers as integers, and floats with high precision as strings
+        # so scikit-learn classifies them as discrete multiclass rather than continuous.
+        y = y.map(lambda val: int(val) if float(val).is_integer() else f"{val:.6g}")
+    if len(X) > 100_000:
+        raise HTTPException(status_code=413, detail="Supervised ML-lab experiments are limited to 100,000 target-valid rows per run.")
     if y.nunique() < 2:
         raise HTTPException(status_code=422, detail="Classification requires at least two target classes.")
-    if pd.api.types.is_numeric_dtype(y) and int(y.nunique()) > 20 and int(y.nunique()) / max(1, len(y)) > 0.2:
-        raise HTTPException(status_code=422, detail="The selected numerical target has many distinct values and may be continuous. Choose Classification only for discrete labels; use Regression for continuous targets.")
-    numeric = data[features].select_dtypes(include=[np.number]).columns.tolist()
-    categorical = [c for c in features if c not in numeric]
-    if categorical:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "The user's preprocessing output still contains categorical input feature(s): "
-                + ", ".join(categorical)
-                + ". AquaGuard will not automatically encode them."
-            ),
-        )
-    finite_columns = numeric + ([target] if pd.api.types.is_numeric_dtype(y) else [])
-    require_finite_numeric(data, finite_columns, task="Classification")
-    if len(data) * max(1, len(numeric)) > 20_000_000:
-        raise HTTPException(status_code=413, detail="Selected processed features exceed the supervised lab memory guard.")
-    return data[features].copy(deep=True), y.copy(deep=True), numeric, categorical
+    continuous_warning = None
+    if pd.api.types.is_numeric_dtype(y) and int(y.nunique()) / max(1, len(y)) >= 0.2:
+        continuous_warning = "The selected numerical target has many distinct values and may be continuous. Discrete labels were used; use Regression for continuous targets."
+    feature_roles = {item["name"]: item["role"] for item in diagnostics["columns"]}
+    numeric = [name for name in features if feature_roles[name] in {"numerical", "datetime"}]
+    categorical = [name for name in features if name not in numeric]
+    if len(X) * max(1, len(numeric) + sum(max(1, normalized[name].nunique(dropna=True)) for name in categorical)) > 20_000_000:
+        raise HTTPException(status_code=413, detail="The estimated one-hot feature matrix exceeds the supervised lab memory guard; reduce selected categories or rows.")
+    diagnostics["target"] = {
+        "name": target,
+        "invalid_or_missing_rows_excluded": excluded,
+        "imputed": False,
+        "reason": "Supervised classification cannot train on rows without a valid class label.",
+        "continuous_warning": continuous_warning,
+    }
+    diagnostics["rows_used"] = int(len(X))
+    diagnostics["feature_missing_values"] = {
+        str(name): int(normalized[name].isna().sum()) for name in normalized.columns if normalized[name].isna().any()
+    }
+    diagnostics["feature_roles"] = feature_roles
+    return X, y, numeric, categorical, diagnostics
 
 
 def _split_indices(y: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     counts = y.value_counts()
     classes = len(counts)
-    if int(counts.min()) < 2:
-        raise HTTPException(status_code=422, detail="Every target class needs at least two complete samples for a stratified holdout evaluation.")
-    n_test = max(int(math.ceil(len(y) * 0.2)), classes)
-    if len(y) - n_test < classes:
-        raise HTTPException(status_code=422, detail="Not enough samples per class for a stratified train/test split.")
+    if classes < 2:
+        raise HTTPException(status_code=422, detail="Classification requires at least two target classes.")
+    if len(y) < 2:
+        raise HTTPException(status_code=422, detail="Classification requires at least two valid samples.")
+    min_class_count = int(counts.min())
+    base_test = max(2 if len(y) >= 4 else 1, int(math.ceil(len(y) * 0.2)))
+    n_test = min(len(y) - 1, base_test)
     indices = np.arange(len(y))
-    train, test = train_test_split(indices, test_size=n_test, random_state=42, stratify=y)
+    if min_class_count >= 2 and n_test >= classes and (len(y) - n_test) >= classes:
+        train, test = train_test_split(indices, test_size=n_test, random_state=42, stratify=y)
+    else:
+        train, test = train_test_split(indices, test_size=n_test, random_state=42)
     return train, test
+
 
 
 def _score(model, X_test, y_test) -> dict:
@@ -264,8 +284,7 @@ def _save_experiment(experiment_id: str, name: str, estimator, features: list[st
     if preprocessing_report:
         data["preprocessing"] = {
             "pipeline_name": preprocessing_report.get("pipeline_name"),
-            "artifact_file": preprocessing_report.get("artifact_file"),
-            "artifact_sha256": preprocessing_report.get("artifact_sha256"),
+            "configured_artifact_sha256": preprocessing_report.get("configured_artifact_sha256"),
             "pipeline_steps": preprocessing_report.get("pipeline_steps", []),
         }
     data["models"][name] = {"artifact": artifact_file, "features": features, "target": target}
@@ -275,15 +294,19 @@ def _save_experiment(experiment_id: str, name: str, estimator, features: list[st
 
 def run_classification(frame: pd.DataFrame, *, dataset_id: str, dataset_metadata: dict, target: str, features: list[str] | None, algorithm: str, folds: int = 5, k: int = 5, n_estimators: int = 100, learning_rate: float = 0.8, preprocessing_report: dict | None = None) -> dict:
     selected = [str(c) for c in frame.columns if c != target] if features is None else features
-    X, y, numeric, categorical = _prepare(frame, target, selected)
-    if algorithm == "knn" and int(k) > len(X) * 0.8:
-        raise HTTPException(status_code=422, detail=f"K must be no greater than the training sample count (currently at most {max(1, int(len(X) * .8))}).")
+    X, y, numeric, categorical, feature_diagnostics = _prepare(frame, target, selected)
     if n_estimators < 1 or n_estimators > 1000:
         raise HTTPException(status_code=422, detail="Number of estimators must be between 1 and 1000.")
     if not (0 < learning_rate <= 10):
         raise HTTPException(status_code=422, detail="AdaBoost learning rate must be between 0 and 10.")
     train_idx, test_idx = _split_indices(y)
-    estimator = _make_estimator(algorithm, numeric, categorical, k=k, n_estimators=n_estimators, learning_rate=learning_rate)
+    if algorithm == "knn" and int(k) > len(train_idx):
+        raise HTTPException(status_code=422, detail=f"K must not exceed the training partition size ({len(train_idx)} rows).")
+    estimator = make_preprocessing_pipeline(
+        X.iloc[train_idx],
+        _make_estimator(algorithm, numeric, categorical, k=k, n_estimators=n_estimators, learning_rate=learning_rate),
+        feature_diagnostics["feature_roles"],
+    )
     try:
         estimator.fit(X.iloc[train_idx], y.iloc[train_idx])
         scores = _score(estimator, X.iloc[test_idx], y.iloc[test_idx])
@@ -291,33 +314,39 @@ def run_classification(frame: pd.DataFrame, *, dataset_id: str, dataset_metadata
         raise
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"{algorithm} could not be fitted: {exc}") from exc
-    cv = _cv_score(clone(_make_estimator(algorithm, numeric, categorical, k=k, n_estimators=n_estimators, learning_rate=learning_rate)), X, y, folds)
-    # A separate refit on all complete rows is retained for optional, explicit promotion.
-    full_model = _make_estimator(algorithm, numeric, categorical, k=k, n_estimators=n_estimators, learning_rate=learning_rate)
+    cv = _cv_score(
+        make_preprocessing_pipeline(
+            X,
+            _make_estimator(algorithm, numeric, categorical, k=k, n_estimators=n_estimators, learning_rate=learning_rate),
+            feature_diagnostics["feature_roles"],
+        ),
+        X,
+        y,
+        folds,
+    )
+    # A separate refit on all target-valid rows is retained for optional, explicit promotion.
+    full_model = make_preprocessing_pipeline(
+        X,
+        _make_estimator(algorithm, numeric, categorical, k=k, n_estimators=n_estimators, learning_rate=learning_rate),
+        feature_diagnostics["feature_roles"],
+    )
     try:
         full_model.fit(X, y)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"The evaluated model could not be refitted on all complete rows: {exc}") from exc
+        raise HTTPException(status_code=422, detail=f"The evaluated model could not be refitted on all valid target rows: {exc}") from exc
     experiment_id = str(uuid4())
     _save_experiment(experiment_id, algorithm, full_model, selected, target, dataset_id, dataset_metadata, preprocessing_report)
-    from backend.services.user_preprocessing_service import preprocessing_status
-    prep_status = preprocessing_status()
-    promotion_ready = (
-        not bool(dataset_metadata.get("is_demo"))
-        and bool(prep_status.get("supports_production_inference"))
-        and isinstance(prep_status.get("input_features"), list)
-        and all(isinstance(item, str) for item in prep_status.get("input_features", []))
-    )
+    promotion_ready = not bool(dataset_metadata.get("is_demo"))
     ineligible_reason = None
     if dataset_metadata.get("is_demo"):
         ineligible_reason = "Synthetic demo data is never eligible for production promotion."
-    elif not promotion_ready:
-        ineligible_reason = "The installed user preprocessing artifact must also expose transform_features(frame) and declare exact raw input_features before this lab model can be promoted."
     result = {
         "algorithm": algorithm, "display_name": {"decision-tree": "Decision Tree / CART", "c45": "C4.5-style (gain ratio)", "naive-bayes": "Gaussian Naive Bayes", "knn": "K-Nearest Neighbors", "bagging": "Bagging", "adaboost": "AdaBoost", "random-forest": "Random Forest"}.get(algorithm, algorithm),
         "dataset_id": dataset_id, "target": target, "features": selected,
         "numeric_features": numeric, "categorical_features": categorical,
         "complete_rows": int(len(X)),
+        "target_rows_excluded": feature_diagnostics["target"]["invalid_or_missing_rows_excluded"],
+        "feature_preprocessing": feature_diagnostics,
         "metrics": {k: v for k, v in scores.items() if k not in {"predictions", "actual"}},
         "actual": scores["actual"], "predicted": scores["predictions"],
         "cross_validation": cv, "experiment_id": experiment_id,
@@ -325,14 +354,20 @@ def run_classification(frame: pd.DataFrame, *, dataset_id: str, dataset_metadata
         "production_ineligible_reason": ineligible_reason,
     }
     if algorithm == "c45":
-        result["tree"] = estimator.tree_summary()
+        tree_model = estimator.named_steps["estimator"]
+        tree_model.feature_names_in_ = np.asarray(
+            estimator.named_steps["preprocessing"].get_feature_names_out(), dtype=object
+        )
+    if algorithm == "c45":
+        result["tree"] = estimator.named_steps["estimator"].tree_summary()
         result["method_note"] = "Numeric thresholds are ranked by entropy-based information gain ratio; candidate splits are filtered by mean information gain. This is not CART/Gini."
     if algorithm == "decision-tree":
-        result["tree"] = export_text(full_model, feature_names=selected, max_depth=4, show_weights=True)
+        names = full_model.named_steps["preprocessing"].get_feature_names_out()
+        result["tree"] = export_text(full_model.named_steps["estimator"], feature_names=names, max_depth=4, show_weights=True)
         result["tree_note"] = "CART tree summary (Gini criterion); truncated at depth 4 for display."
     if algorithm == "random-forest":
-        classifier = full_model
-        names = selected
+        classifier = full_model.named_steps["estimator"]
+        names = full_model.named_steps["preprocessing"].get_feature_names_out()
         result["feature_importance"] = sorted(
             [{"feature": str(name), "importance": float(value)} for name, value in zip(names, classifier.feature_importances_)],
             key=lambda item: item["importance"], reverse=True,
@@ -361,7 +396,6 @@ def compare_classifiers(frame: pd.DataFrame, *, dataset_id: str, dataset_metadat
 
 def promote_experiment(experiment_id: str, model_name: str) -> dict:
     from backend.config import MODELS_DIR
-    from backend.services.user_preprocessing_service import UserPipelinePredictor, get_user_pipeline
     from backend.utils.model_loader import invalidate_model_cache
 
     folder = (EXPERIMENT_DIR / experiment_id).resolve()
@@ -380,29 +414,12 @@ def promote_experiment(experiment_id: str, model_name: str) -> dict:
     if folder not in artifact_path.parents or not artifact_path.exists():
         raise HTTPException(status_code=404, detail="The selected model artifact is missing.")
 
-    pipeline, pipeline_metadata, pipeline_status = get_user_pipeline()
-    saved_preprocessing = metadata.get("preprocessing") or {}
-    if saved_preprocessing.get("artifact_sha256") != pipeline_status.get("artifact_sha256"):
-        raise HTTPException(
-            status_code=409,
-            detail="The active user preprocessing artifact differs from the one used for this experiment. Re-run the experiment with the current pipeline before promotion.",
-        )
-    raw_features = pipeline_status.get("input_features")
-    if not callable(getattr(pipeline, "transform_features", None)) or not isinstance(raw_features, list) or not raw_features or not all(isinstance(item, str) for item in raw_features):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This experiment cannot be promoted safely. The exact user pipeline must "
-                "implement transform_features(frame) for raw inference and declare its "
-                "ordered raw input_features. No preprocessing was guessed."
-            ),
-        )
-
     try:
         estimator = joblib.load(artifact_path)
-        production_pipeline = UserPipelinePredictor(pipeline, estimator, model_info["features"])
+        if not callable(getattr(estimator, "predict", None)):
+            raise ValueError("The saved experiment artifact is not a fitted prediction pipeline.")
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Could not assemble the candidate with the installed user pipeline: {exc}") from exc
+        raise HTTPException(status_code=422, detail=f"Could not load the fitted experiment pipeline: {exc}") from exc
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     artifact_name = f"production_model_promoted_{experiment_id[:8]}.pkl"
@@ -412,15 +429,14 @@ def promote_experiment(experiment_id: str, model_name: str) -> dict:
 
     config = {
         "model_name": model_name,
-        "features": raw_features,
+        "features": model_info["features"],
         "transformed_features": model_info["features"],
         "target_name": model_info["target"],
         "preprocessing_in_pipeline": True,
         "selected_experiment_id": experiment_id,
-        "user_preprocessing_artifact": pipeline_status["artifact_file"],
-        "selection_note": "Fit on all complete processed rows after a separate holdout and cross-validation evaluation. The installed user pipeline is retained for raw inference.",
+        "selection_note": "Explicitly promoted fitted estimator with its training-fitted type, imputation, and encoding steps after separate holdout and cross-validation evaluation.",
     }
-    bundle = {"pipeline": production_pipeline, "feature_config": config}
+    bundle = {"pipeline": estimator, "feature_config": config}
     temporary_artifact = MODELS_DIR / f"{artifact_name}.tmp"
     try:
         joblib.dump(bundle, temporary_artifact)
@@ -441,9 +457,9 @@ def promote_experiment(experiment_id: str, model_name: str) -> dict:
     return {
         "status": "promoted",
         "model_name": model_name,
-        "features": raw_features,
+        "features": model_info["features"],
         "transformed_features": model_info["features"],
         "artifact_file": artifact_name,
         "previous_model_artifacts_preserved": True,
-        "warning": "This explicit promotion retains the installed preprocessing pipeline. It does not certify drinking-water safety; validate against the intended deployment population.",
+        "warning": "This explicit promotion retains the fitted preprocessing pipeline. It does not certify drinking-water safety; validate against the intended deployment population.",
     }

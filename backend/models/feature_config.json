@@ -1,0 +1,18 @@
+{
+  "artifact_file": "production_model.pkl",
+  "preprocessing_artifact": "preprocessing.pkl",
+  "model_name": "Demo Water Quality Model",
+  "features": [
+    "ph",
+    "Hardness",
+    "Solids",
+    "Chloramines",
+    "Sulfate",
+    "Conductivity",
+    "Organic_carbon",
+    "Trihalomethanes",
+    "Turbidity"
+  ],
+  "target_name": "Potability",
+  "preprocessing_in_pipeline": false
+}

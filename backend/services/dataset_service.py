@@ -10,6 +10,7 @@ import pandas as pd
 from fastapi import HTTPException
 from backend.config import MAX_UPLOAD_BYTES, PROCESSED_DIR, UPLOAD_DIR, PROJECT_DIR
 from backend.utils.dataset_validator import json_safe, validate_csv_bytes
+from backend.utils.experiment_data import profile_frame
 
 
 def _safe_name(filename: str) -> str:
@@ -21,20 +22,50 @@ def _safe_name(filename: str) -> str:
 
 
 def inspect_dataframe(frame: pd.DataFrame) -> dict:
-    numeric = frame.select_dtypes(include=[np.number]).columns.tolist()
-    categorical = [c for c in frame.columns if c not in numeric]
+    profiles = profile_frame(frame)
+    roles = {item["name"]: item for item in profiles}
+    empty_columns = [column for column, item in roles.items() if item["role"] == "empty"]
+    numeric = [column for column, item in roles.items() if item["role"] == "numerical"]
+    categorical = [column for column, item in roles.items() if item["role"] in {"categorical", "boolean"}]
+    identifiers = [column for column, item in roles.items() if item["role"] == "identifier"]
+    dates = [column for column, item in roles.items() if item["role"] == "datetime"]
+    complete_numeric = [
+        column
+        for column in numeric
+        if roles[str(column)]["missing_values"] == 0
+        and roles[str(column)]["invalid_values"] == 0
+        and roles[str(column)]["infinite_values"] == 0
+    ]
+    classification_targets = []
+    for column in frame.columns:
+        if column in empty_columns or column in identifiers:
+            continue
+        values = frame[column].dropna()
+        if values.dtype == object or isinstance(values.dtype, pd.StringDtype):
+            text = values.astype("string").str.strip()
+            values = values[~text.str.lower().isin({"", "na", "n/a", "nan", "null", "none", "nat"})]
+        counts = values.value_counts(dropna=True)
+        class_count = len(counts)
+        numeric_target = pd.api.types.is_numeric_dtype(values)
+        looks_continuous = numeric_target and (
+            class_count >= 50 or (len(values) > 10 and class_count / len(values) > 0.8)
+        )
+        if class_count >= 2 and int(counts.min()) >= 1 and not looks_continuous:
+            classification_targets.append((column, class_count, int(counts.min())))
+    classification_targets.sort(key=lambda item: (item[1], -item[2], str(item[0])))
     missing = {str(c): int(v) for c, v in frame.isna().sum().items() if int(v) > 0}
     dtype_map = {str(c): str(t) for c, t in frame.dtypes.items()}
     duplicate_count = int(frame.duplicated().sum())
     stats = {}
     for column in numeric:
-        series = frame[column].dropna()
-        if len(series):
+        values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+        values = values[np.isfinite(values)]
+        if len(values):
             stats[str(column)] = {
-                "min": json_safe(series.min()),
-                "max": json_safe(series.max()),
-                "mean": json_safe(series.mean()),
-                "std": json_safe(series.std()),
+                "min": json_safe(np.min(values)),
+                "max": json_safe(np.max(values)),
+                "mean": json_safe(np.mean(values)),
+                "std": json_safe(np.std(values, ddof=1)) if len(values) > 1 else None,
             }
     preview = frame.head(8).replace({np.nan: None}).to_dict(orient="records")
     return {
@@ -42,7 +73,15 @@ def inspect_dataframe(frame: pd.DataFrame) -> dict:
         "column_count": int(frame.shape[1]),
         "columns": [str(c) for c in frame.columns],
         "numeric_columns": [str(c) for c in numeric],
+        "complete_numeric_columns": [str(c) for c in complete_numeric],
+        "classification_target_candidates": [str(item[0]) for item in classification_targets],
         "categorical_columns": [str(c) for c in categorical],
+        "boolean_columns": [str(c) for c, item in roles.items() if item["role"] == "boolean"],
+        "datetime_columns": [str(c) for c in dates],
+        "identifier_columns": [str(c) for c in identifiers],
+        "empty_columns": [str(c) for c in empty_columns],
+        "feature_columns": [str(c) for c in frame.columns if c not in identifiers and c not in empty_columns],
+        "column_profiles": profiles,
         "dtypes": dtype_map,
         "missing_value_summary": missing,
         "missing_total": int(frame.isna().sum().sum()),
@@ -99,6 +138,9 @@ def get_dataset_path(dataset_id: str) -> Path:
     if UPLOAD_DIR.resolve() not in folder.parents:
         raise HTTPException(status_code=400, detail="Invalid dataset path.")
     if not folder.exists():
+        processed_file = (PROCESSED_DIR / f"{clean_id}.csv").resolve()
+        if PROCESSED_DIR.resolve() in processed_file.parents and processed_file.exists():
+            return processed_file
         raise HTTPException(status_code=404, detail="Dataset file was not found. Upload the CSV again after a backend restart if needed.")
     files = [path for path in folder.iterdir() if path.is_file() and path.suffix.lower() == ".csv"]
     if len(files) != 1:

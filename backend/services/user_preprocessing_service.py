@@ -68,10 +68,10 @@ def _unpack_artifact() -> tuple[Any | None, dict[str, Any], dict[str, Any]]:
             "required_method": "preprocess_frame(DataFrame) -> DataFrame",
         }
 
-    steps = metadata.get("steps", getattr(pipeline, "preprocessing_steps", []))
+    steps = getattr(pipeline, "preprocessing_steps", metadata.get("steps", []))
     if not isinstance(steps, list) or not all(isinstance(item, str) for item in steps):
         steps = []
-    name = metadata.get("name") or getattr(pipeline, "pipeline_name", None) or type(pipeline).__name__
+    name = getattr(pipeline, "pipeline_name", None) or metadata.get("name") or type(pipeline).__name__
     try:
         artifact_sha256 = hashlib.sha256(ARTIFACT_PATH.read_bytes()).hexdigest()
     except OSError as exc:
@@ -82,6 +82,7 @@ def _unpack_artifact() -> tuple[Any | None, dict[str, Any], dict[str, Any]]:
             "required_method": "preprocess_frame(DataFrame) -> DataFrame",
         }
     status = {
+        "artifact_exists": True,
         "available": True,
         "reason": None,
         "pipeline_name": str(name),
@@ -96,9 +97,31 @@ def _unpack_artifact() -> tuple[Any | None, dict[str, Any], dict[str, Any]]:
     return pipeline, metadata, status
 
 
-def preprocessing_status() -> dict[str, Any]:
-    """Report readiness; the original data is not read or changed."""
-    _, _, status = _unpack_artifact()
+def preprocessing_status(dataset_id: str | None = None) -> dict[str, Any]:
+    """Report preprocessing readiness across artifact existence, production model usage, and dataset transformation."""
+    pipeline, _, status = _unpack_artifact()
+    from backend.utils.model_loader import get_model_bundle
+    bundle = get_model_bundle()
+    status["production_model_uses_preprocessing"] = bool(
+        bundle.get("available") and (bundle.get("integrated") or bundle.get("preprocessing") is not None)
+    )
+    status["production_model_name"] = bundle.get("model_name") if bundle.get("available") else None
+    status["transforms_selected_dataset"] = None
+    status["dataset_changed"] = None
+    status["dataset_transform_error"] = None
+
+    if dataset_id and status.get("available") and pipeline is not None:
+        try:
+            from backend.services.dataset_service import load_dataset
+            frame, _ = load_dataset(dataset_id)
+            input_copy = frame.copy(deep=True)
+            processed = pipeline.preprocess_frame(input_copy)
+            status["transforms_selected_dataset"] = isinstance(processed, pd.DataFrame)
+            status["dataset_changed"] = bool(not processed.equals(frame) if isinstance(processed, pd.DataFrame) else False)
+        except Exception as exc:
+            status["transforms_selected_dataset"] = False
+            status["dataset_transform_error"] = str(exc)
+
     return status
 
 
@@ -159,6 +182,15 @@ def apply_user_preprocessing(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[st
 
     processed = processed.copy(deep=True)
     complete_mask = ~processed.isna().any(axis=1) if len(processed.columns) else pd.Series(False, index=processed.index)
+    missing_before = int(frame.isna().sum().sum())
+    missing_after = int(processed.isna().sum().sum())
+    data_changed = (missing_before != missing_after) or (len(processed) != len(frame)) or (not processed.equals(frame))
+
+    if data_changed:
+        note = "AquaGuard applied the configured pipeline to a separate copy; configured transformations were performed and missing values imputed."
+    else:
+        note = "The configured user pipeline processed the dataset and left values unchanged; no modifications or row removals were necessary."
+
     report = {
         "pipeline_name": status["pipeline_name"],
         "pipeline_steps": status.get("steps", []),
@@ -169,13 +201,15 @@ def apply_user_preprocessing(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[st
         "rows_removed_by_pipeline": int(len(frame) - len(processed)),
         "complete_processed_rows": int(complete_mask.sum()),
         "incomplete_processed_rows": int((~complete_mask).sum()),
-        "missing_cells_before": int(frame.isna().sum().sum()),
-        "missing_cells_after": int(processed.isna().sum().sum()),
+        "missing_cells_before": missing_before,
+        "missing_cells_after": missing_after,
         "original_preserved": True,
         "application_added_preprocessing": False,
-        "note": "AquaGuard applied only the configured user pipeline to a separate copy; no additional cleaning or transformation was performed.",
+        "data_changed": bool(data_changed),
+        "note": note,
     }
     return processed, report
+
 
 
 class UserPipelinePredictor:
