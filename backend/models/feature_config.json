@@ -1,7 +1,8 @@
 {
   "artifact_file": "production_model.pkl",
   "preprocessing_artifact": "preprocessing.pkl",
-  "model_name": "Demo Water Quality Model",
+  "model_name": "AquaGuard Random Forest Model",
+  "model_type": "random_forest",
   "features": [
     "ph",
     "Hardness",
@@ -14,5 +15,39 @@
     "Turbidity"
   ],
   "target_name": "Potability",
-  "preprocessing_in_pipeline": false
+  "target_labels": {
+    "0": "NON-POTABLE",
+    "1": "POTABLE"
+  },
+  "feature_units": {
+    "ph": "pH",
+    "Hardness": "mg/L",
+    "Solids": "ppm",
+    "Chloramines": "ppm",
+    "Sulfate": "mg/L",
+    "Conductivity": "\u03bcS/cm",
+    "Organic_carbon": "ppm",
+    "Trihalomethanes": "\u03bcg/L",
+    "Turbidity": "NTU"
+  },
+  "preprocessing_in_pipeline": false,
+  "last_trained": "2026-10-13T02:09:56.354397+00:00",
+  "evaluation": {
+    "accuracy": 0.6667,
+    "precision_weighted": 0.6786,
+    "recall_weighted": 0.6667,
+    "f1_weighted": 0.6697,
+    "cv_f1_mean": 0.5436,
+    "cv_f1_std": 0.141,
+    "confusion_matrix": [
+      [
+        6,
+        3
+      ],
+      [
+        2,
+        4
+      ]
+    ]
+  }
 }

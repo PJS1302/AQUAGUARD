@@ -5,7 +5,7 @@ import { Tag } from './UI';
 const NAV_GROUPS = [
   { label: 'WORKSPACE', items: [
     { id: 'dashboard', label: 'Dashboard', icon: 'grid' },
-    { id: 'prediction', label: 'Demo Prediction', icon: 'droplet' },
+    { id: 'prediction', label: 'AI Prediction', icon: 'droplet' },
     { id: 'datasets', label: 'Datasets & Upload', icon: 'database' },
     { id: 'laboratory', label: 'ML Laboratory', icon: 'flask' },
   ] },
@@ -18,13 +18,13 @@ const NAV_GROUPS = [
   { label: 'OPERATIONS', items: [
     { id: 'iot', label: 'IoT Monitoring', icon: 'radio' },
     { id: 'history', label: 'Prediction History', icon: 'history' },
-    { id: 'about', label: 'About AquaGuard', icon: 'book' },
+    { id: 'about', label: 'About & API Guide', icon: 'book' },
   ] },
 ];
 
 export const PAGE_META = {
   dashboard: { title: 'Water intelligence, at a glance', eyebrow: 'OVERVIEW', description: 'A live view of your monitoring and analytics workspace.' },
-  prediction: { title: 'Production prediction', eyebrow: 'MODEL INFERENCE', description: 'Run the validated model artifact with its original feature pipeline.' },
+  prediction: { title: 'AI Water Quality Prediction', eyebrow: 'ML INFERENCE & EXPLAINABILITY', description: 'Analyze water quality readings with the trained ML classifier and SHAP explainability.' },
   datasets: { title: 'Datasets & uploads', eyebrow: 'DATA WORKSPACE', description: 'Inspect source files, keep originals intact, and create separate analysis copies.' },
   laboratory: { title: 'ML Laboratory', eyebrow: 'EXPERIMENT WORKSPACE', description: 'Run each learning method for the task it was designed to solve.' },
   regression: { title: 'Regression analysis', eyebrow: 'CONTINUOUS TARGETS', description: 'Model a numerical water parameter with interpretable regression experiments.' },

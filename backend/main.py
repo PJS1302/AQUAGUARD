@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.database.connection import init_db
-from backend.routes import health, prediction, dataset, regression, classification, clustering, pca, devices, readings, dashboard, preprocessing
+from backend.routes import health, prediction, dataset, regression, classification, clustering, pca, devices, readings, dashboard, preprocessing, iot_ws
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
@@ -41,7 +41,7 @@ else:
         allow_headers=["*"],
     )
 
-for route_module in (health, prediction, dataset, regression, classification, clustering, pca, devices, readings, dashboard, preprocessing):
+for route_module in (health, prediction, dataset, regression, classification, clustering, pca, devices, readings, dashboard, preprocessing, iot_ws):
     app.include_router(route_module.router, prefix="/api")
 
 # Serve React frontend static files when built

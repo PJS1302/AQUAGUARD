@@ -172,8 +172,27 @@ def create_reading(device_key: str, timestamp: datetime | None, features: dict[s
             else:
                 # The sensor reading is still valid historical telemetry even if its feature set doesn't match the model.
                 prediction_error = str(exc.detail)
-        return {"reading_id": reading.id, "device_id": device.device_code, "timestamp": recorded_at.isoformat(), "source": source,
-                "features": features, "prediction": prediction, "prediction_status": "available" if prediction else "not_available", "prediction_message": prediction_error}
+        reading_result = {
+            "type": "new_reading",
+            "reading_id": reading.id,
+            "device_id": device.device_code,
+            "device_name": device.device_name,
+            "timestamp": recorded_at.isoformat(),
+            "source": source,
+            "is_simulated": source == "simulation",
+            "features": features,
+            "prediction": prediction,
+            "prediction_status": "available" if prediction else "not_available",
+            "prediction_message": prediction_error,
+        }
+
+        try:
+            from backend.services.websocket_manager import ws_manager
+            ws_manager.sync_broadcast(reading_result)
+        except Exception as exc:
+            pass
+
+        return reading_result
     except HTTPException:
         session.rollback()
         raise

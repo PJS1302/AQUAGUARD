@@ -53,7 +53,41 @@ async def predict_file(dataset_id: str | None = Form(default=None), file: Upload
         if index < 5_000:
             persistence_rows.append({"prediction": prediction, "confidence": confidence, "features": row_features})
     persisted = record_predictions_bulk(source="dataset", model_name=result["model_name"], values=persistence_rows, dataset_id=dataset_id)
-    return {"dataset_id": dataset_id, "file_name": metadata.get("file_name"), "row_count": len(items), "model_name": result["model_name"], "confidence_method": result.get("confidence_method"), "results": items, "persisted_predictions": persisted, "original_preserved": True}
+    return {
+        "dataset_id": dataset_id,
+        "file_name": metadata.get("file_name"),
+        "row_count": len(items),
+        "model_name": result["model_name"],
+        "confidence_method": result.get("confidence_method"),
+        "potable_count": result.get("potable_count", sum(1 for p in predictions if str(p) in ("1", "1.0", "True"))),
+        "non_potable_count": result.get("non_potable_count", sum(1 for p in predictions if str(p) in ("0", "0.0", "False"))),
+        "safety_notice": "A model prediction is not a certified drinking-water safety assessment. Laboratory testing and applicable drinking-water standards are necessary to establish safety.",
+        "results": [
+            {
+                **item,
+                "predicted_label": result.get("predicted_labels", [])[i] if i < len(result.get("predicted_labels", [])) else ("POTABLE" if str(item["prediction"]) == "1" else "NON-POTABLE"),
+            }
+            for i, item in enumerate(items)
+        ],
+        "persisted_predictions": persisted,
+        "original_preserved": True,
+    }
+
+
+@router.get("/prediction/shap-global")
+def shap_global():
+    from backend.utils.model_loader import get_model_bundle
+    from backend.services.shap_service import get_global_feature_importance
+
+    bundle = get_model_bundle()
+    if not bundle.get("available"):
+        raise HTTPException(status_code=503, detail="Production model not configured.")
+    return get_global_feature_importance(
+        model=bundle["model"],
+        preprocessor=bundle.get("preprocessing"),
+        features=bundle["features"],
+        units=bundle.get("config", {}).get("feature_units"),
+    )
 
 
 @router.get("/predictions")
@@ -62,4 +96,5 @@ def predictions(limit: int = 100, _session=__import__("fastapi").Depends(require
     rows = _session.scalars(select(Prediction).order_by(desc(Prediction.timestamp)).limit(safe_limit)).all()
     return {"items": [{"id": row.id, "source": row.source, "dataset_id": row.dataset_id, "device_id": row.device_id,
                        "timestamp": row.timestamp.isoformat(), "model_name": row.model_name, "prediction": row.prediction,
+                       "predicted_label": "POTABLE" if str(row.prediction) in ("1", "1.0", "True", "potable") else "NON-POTABLE",
                        "confidence": row.confidence, "features": row.input_features} for row in rows], "count": len(rows)}

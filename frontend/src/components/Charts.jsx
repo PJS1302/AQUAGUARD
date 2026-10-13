@@ -76,3 +76,133 @@ export function TinyBars({ items, valueKey = 'importance', labelKey = 'feature' 
   const max=Math.max(...items.map(x=>Number(x[valueKey])||0))||1;
   return <div className="tiny-bars">{items.slice(0,8).map((item,index)=><div className="tiny-bar-row" key={index}><span>{item[labelKey]}</span><div className="tiny-bar-track"><i style={{width:`${(Number(item[valueKey])/max)*100}%`}}/></div><b>{Number(item[valueKey]).toFixed(3)}</b></div>)}</div>;
 }
+
+export function ShapContributionBars({ contributions = [] }) {
+  if (!contributions?.length) return <div className="chart-empty">No SHAP contributions available.</div>;
+  const maxAbs = Math.max(...contributions.map((c) => Math.abs(Number(c.shap_value) || 0))) || 1;
+
+  return (
+    <div className="shap-bars-container">
+      <div className="shap-legend">
+        <span className="legend-item legend-potable"><i /> Pushing toward POTABLE (+)</span>
+        <span className="legend-item legend-nonpotable"><i /> Pulling toward NON-POTABLE (−)</span>
+      </div>
+      <div className="shap-bars-list">
+        {contributions.map((item, idx) => {
+          const val = Number(item.shap_value) || 0;
+          const isPos = val >= 0;
+          const widthPercent = Math.min(100, (Math.abs(val) / maxAbs) * 100);
+
+          return (
+            <div className="shap-bar-row" key={item.feature || idx}>
+              <div className="shap-feature-meta">
+                <strong>{item.feature}</strong>
+                <span className="shap-measured">
+                  {item.value != null ? `${item.value} ${item.unit || ''}` : ''}
+                </span>
+              </div>
+              <div className="shap-axis-track">
+                <div className="shap-zero-line" />
+                <div
+                  className={`shap-bar-fill ${isPos ? 'shap-fill-positive' : 'shap-fill-negative'}`}
+                  style={{
+                    width: `${widthPercent * 0.48}%`,
+                    left: isPos ? '50%' : undefined,
+                    right: !isPos ? '50%' : undefined,
+                  }}
+                />
+              </div>
+              <div className={`shap-val-badge ${isPos ? 'badge-pos' : 'badge-neg'}`}>
+                {isPos ? `+${val.toFixed(3)}` : val.toFixed(3)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function ShapWaterfallChart({ waterfall = [] }) {
+  if (!waterfall?.length) return <div className="chart-empty">No waterfall data available.</div>;
+  const values = waterfall.map((w) => Number(w.cumulative) || 0);
+  const minVal = Math.min(0, ...values);
+  const maxVal = Math.max(1, ...values);
+  const range = maxVal - minVal || 1;
+
+  return (
+    <div className="waterfall-chart-wrap">
+      <div className="waterfall-header">
+        <span>Step / Feature</span>
+        <span>Impact</span>
+        <span>Cumulative Score</span>
+      </div>
+      <div className="waterfall-steps">
+        {waterfall.map((step, idx) => {
+          const cum = Number(step.cumulative) || 0;
+          const val = Number(step.value) || 0;
+          const isBase = step.type === 'base';
+          const isFinal = step.type === 'final';
+          const isPos = val >= 0;
+          const leftPct = Math.max(0, Math.min(100, ((cum - minVal) / range) * 100));
+
+          return (
+            <div className={`waterfall-step-row ${isBase ? 'step-base' : isFinal ? 'step-final' : ''}`} key={idx}>
+              <div className="step-name">
+                <span className="step-num">{idx === 0 ? '0' : idx === waterfall.length - 1 ? '=' : idx}</span>
+                <strong>{step.label}</strong>
+              </div>
+              <div className="step-bar-col">
+                <div className="step-track">
+                  <div
+                    className={`step-marker ${isBase ? 'marker-base' : isFinal ? 'marker-final' : isPos ? 'marker-pos' : 'marker-neg'}`}
+                    style={{ left: `${leftPct}%` }}
+                  />
+                </div>
+              </div>
+              <div className="step-value-col">
+                {isBase ? (
+                  <span className="val-neutral">Base: {cum.toFixed(3)}</span>
+                ) : isFinal ? (
+                  <strong className="val-final">Score: {cum.toFixed(3)}</strong>
+                ) : (
+                  <span className={isPos ? 'val-pos' : 'val-neg'}>
+                    {isPos ? `+${val.toFixed(3)}` : val.toFixed(3)} → <b>{cum.toFixed(3)}</b>
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function ShapGlobalSummary({ items = [] }) {
+  if (!items?.length) return <div className="chart-empty">No global feature importance available.</div>;
+  const max = Math.max(...items.map((x) => Number(x.mean_abs_shap) || 0)) || 1;
+
+  return (
+    <div className="global-shap-list">
+      {items.map((item, idx) => {
+        const score = Number(item.mean_abs_shap) || 0;
+        const pct = Math.min(100, (score / max) * 100);
+
+        return (
+          <div className="global-shap-row" key={item.feature || idx}>
+            <div className="global-shap-rank">#{item.rank || idx + 1}</div>
+            <div className="global-shap-name">
+              <strong>{item.feature}</strong>
+              {item.unit && <small>({item.unit})</small>}
+            </div>
+            <div className="global-shap-track">
+              <div className="global-shap-fill" style={{ width: `${pct}%` }} />
+            </div>
+            <div className="global-shap-val">{score.toFixed(4)}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}

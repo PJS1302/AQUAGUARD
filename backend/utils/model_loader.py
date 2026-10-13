@@ -153,14 +153,26 @@ def get_model_bundle(refresh: bool = False) -> dict:
 def model_status() -> dict:
     bundle = get_model_bundle()
     if not bundle.get("available"):
-        return {"available": False, "reason": bundle.get("reason"), "model_name": None, "features": []}
+        return {
+            "available": False,
+            "reason": bundle.get("reason"),
+            "model_name": None,
+            "features": [],
+            "feature_units": {},
+            "target_labels": {},
+            "shap_supported": False,
+        }
+    config = bundle.get("config", {})
     return {
         "available": True,
         "reason": None,
         "model_name": bundle["model_name"],
         "features": bundle["features"],
+        "feature_units": config.get("feature_units", {}),
+        "target_labels": config.get("target_labels", {"0": "NON-POTABLE", "1": "POTABLE"}),
         "integrated_pipeline": bool(bundle.get("integrated")),
         "preprocessing_connected": bool(bundle.get("integrated") or bundle.get("preprocessing") is not None),
+        "shap_supported": True,
     }
 
 
@@ -237,13 +249,59 @@ def predict_frame(frame: pd.DataFrame, *, raise_unavailable: bool = True) -> dic
     missing = [name for name in features if name not in frame.columns]
     if missing:
         raise HTTPException(status_code=422, detail={"message": "Dataset is missing production model features.", "missing_features": missing, "required_features": features})
+def _map_label(prediction: Any, config: dict) -> tuple[str, str]:
+    labels = config.get("target_labels") or {"0": "NON-POTABLE", "1": "POTABLE"}
+    str_val = str(prediction).strip()
+    if str_val in labels:
+        label = labels[str_val]
+    elif str_val in ("1", "1.0", "True", "true", "potable"):
+        label = "POTABLE"
+    elif str_val in ("0", "0.0", "False", "false", "non-potable", "non_potable"):
+        label = "NON-POTABLE"
+    else:
+        label = str(prediction)
+
+    status_text = f"{label} — predicted {'potable' if label == 'POTABLE' else 'non-potable'} by the ML model"
+    return label, status_text
+
+
+def predict_frame(frame: pd.DataFrame, *, raise_unavailable: bool = True) -> dict:
+    bundle = get_model_bundle()
+    if not bundle.get("available"):
+        if raise_unavailable:
+            raise HTTPException(status_code=503, detail=f"Production prediction is unavailable: {bundle.get('reason')}")
+        return {"available": False, "reason": bundle.get("reason")}
+    features = bundle["features"]
+    missing = [name for name in features if name not in frame.columns]
+    if missing:
+        raise HTTPException(status_code=422, detail={"message": "Dataset is missing production model features.", "missing_features": missing, "required_features": features})
     X = frame.loc[:, features].copy(deep=True)
     transformed = _transform(X, bundle)
     try:
         predictions = bundle["model"].predict(transformed)
     except Exception as exc:
         raise _prediction_error(exc, bundle, "The supplied features") from exc
-    result = {"available": True, "model_name": bundle["model_name"], "predictions": [json_safe(x) for x in predictions], "confidence": None, "confidence_method": None}
+
+    config = bundle.get("config", {})
+    mapped_labels = []
+    status_texts = []
+    for pred in predictions:
+        lbl, txt = _map_label(pred, config)
+        mapped_labels.append(lbl)
+        status_texts.append(txt)
+
+    result = {
+        "available": True,
+        "model_name": bundle["model_name"],
+        "predictions": [json_safe(x) for x in predictions],
+        "predicted_labels": mapped_labels,
+        "status_texts": status_texts,
+        "confidence": None,
+        "confidence_method": None,
+        "potable_count": sum(1 for l in mapped_labels if l == "POTABLE"),
+        "non_potable_count": sum(1 for l in mapped_labels if l == "NON-POTABLE"),
+        "safety_notice": "A model prediction is not a certified drinking-water safety assessment. Laboratory testing and applicable drinking-water standards are necessary to establish safety.",
+    }
     if hasattr(bundle["model"], "predict_proba"):
         try:
             probabilities = np.asarray(bundle["model"].predict_proba(transformed), dtype=float)
@@ -255,9 +313,15 @@ def predict_frame(frame: pd.DataFrame, *, raise_unavailable: bool = True) -> dic
 
 
 def predict_one(features: dict[str, float]) -> dict:
+    from datetime import datetime, timezone
+    from backend.services.shap_service import explain_prediction
+
     bundle = get_model_bundle()
     if not bundle.get("available"):
-        raise HTTPException(status_code=503, detail=f"Production prediction is unavailable: {bundle.get('reason')}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"AI prediction unavailable — trained model not configured: {bundle.get('reason')}"
+        )
     expected = bundle["features"]
     missing = [name for name in expected if name not in features]
     if missing:
@@ -268,12 +332,55 @@ def predict_one(features: dict[str, float]) -> dict:
         prediction = bundle["model"].predict(transformed)[0]
     except Exception as exc:
         raise _prediction_error(exc, bundle, "The input") from exc
+
+    config = bundle.get("config", {})
+    predicted_label, status_text = _map_label(prediction, config)
     confidence, method = _confidence(bundle["model"], transformed)
+
+    class_probs = None
+    if hasattr(bundle["model"], "predict_proba"):
+        try:
+            raw_probs = bundle["model"].predict_proba(transformed)[0]
+            if len(raw_probs) == 2:
+                class_probs = {
+                    "NON-POTABLE": round(float(raw_probs[0]), 4),
+                    "POTABLE": round(float(raw_probs[1]), 4),
+                }
+            else:
+                class_probs = {f"class_{i}": round(float(p), 4) for i, p in enumerate(raw_probs)}
+        except Exception:
+            pass
+
+    units = config.get("feature_units", {})
+    inputs_with_units = [
+        {"feature": name, "value": features[name], "unit": units.get(name, "")}
+        for name in expected
+    ]
+
+    # Compute genuine SHAP explanation
+    shap_explanation = explain_prediction(
+        model=bundle["model"],
+        preprocessor=bundle.get("preprocessing"),
+        raw_features=features,
+        transformed_frame=transformed,
+        features=expected,
+        units=units,
+        target_labels=config.get("target_labels"),
+    )
+
     return {
         "model_name": bundle["model_name"],
+        "model_status": "trained and active",
         "prediction": json_safe(prediction),
+        "predicted_label": predicted_label,
+        "status_text": status_text,
         "confidence": confidence,
+        "class_probabilities": class_probs,
         "confidence_method": method,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "input_readings": inputs_with_units,
+        "shap_explanation": shap_explanation,
+        "safety_notice": "A model prediction is not a certified drinking-water safety assessment. Laboratory testing and applicable drinking-water standards are necessary to establish safety.",
         "warning": "Confidence is shown only when the artifact exposes predict_proba; a probability is not necessarily calibrated.",
     }
 
